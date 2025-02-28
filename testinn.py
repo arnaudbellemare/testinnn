@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import ccxt
 from numba import njit
-from scipy.stats import norm, t
+from scipy.stats import norm, t, studentt
 from plotnine import ggplot, aes, geom_line, labs, theme_minimal, theme
 
 # =============================================================================
@@ -30,10 +30,14 @@ lookback_options = {
     "2 Weeks": 20160,
     "1 Month": 43200
 }
-global_lookback_label = st.sidebar.selectbox("Select Global Lookback Period", list(lookback_options.keys()), key="global_lookback_label")
+global_lookback_label = st.sidebar.selectbox("Select Global Lookback Period",
+                                               list(lookback_options.keys()),
+                                               key="global_lookback_label")
 global_lookback_minutes = lookback_options[global_lookback_label]
-timeframe = st.sidebar.selectbox("Select Timeframe", ["1m", "5m", "15m", "1h"], key="timeframe_widget")
-bvc_model = st.sidebar.selectbox("Select BVC Model", ["Hawkes", "ACD", "ACI"], key="bvc_model")
+timeframe = st.sidebar.selectbox("Select Timeframe", ["1m", "5m", "15m", "1h"],
+                                 key="timeframe_widget")
+bvc_model = st.sidebar.selectbox("Select BVC Model", ["Hawkes", "ACD", "ACI"],
+                                 key="bvc_model")
 
 @njit(cache=True)
 def ema(arr_in: np.ndarray, window: int, alpha: float = 0) -> np.ndarray:
@@ -51,7 +55,7 @@ def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
     cutoff_ts = now_ms - lookback_minutes * 60 * 1000
     all_ohlcv = []
     since = cutoff_ts
-    max_limit = 1440
+    max_limit = 1440  # Kraken returns max 1440 candles per request
     while True:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=max_limit)
         if not ohlcv:
@@ -68,6 +72,7 @@ def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
     df = df[df["stamp"] >= cutoff]
     return df
 
+@st.cache_data
 def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
     exchange = ccxt.kraken()
     now_ms = exchange.milliseconds()
@@ -86,8 +91,7 @@ def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
     if not all_trades:
         raise ValueError(f"No trades returned from Kraken in the last {lookback_minutes} minutes.")
     df_tr = pd.DataFrame(all_trades)
-    # Convert to datetime (seconds) for later use
-    df_tr['time'] = df_tr['timestamp'] / 1000.0  # as float (seconds)
+    df_tr['time'] = df_tr['timestamp'] / 1000.0  # time as seconds (float)
     df_tr['vol'] = df_tr['amount']
     df_tr = df_tr[['time', 'price', 'vol']].copy()
     df_tr.sort_values('time', inplace=True)
@@ -159,9 +163,8 @@ class ACDBVC:
 
     def eval(self, df_tr: pd.DataFrame, scale=1e4) -> pd.DataFrame:
         try:
-            # Work on a copy and ensure the "time" column is numeric (seconds)
             df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
-            # Compute duration (in seconds)
+            # Compute duration in seconds (since time is in seconds as float)
             df_tr['duration'] = df_tr['time'].diff().shift(-1)
             df_tr = df_tr.dropna(subset=['duration'])
             df_tr = df_tr[df_tr['duration'] > 0]
@@ -183,7 +186,7 @@ class ACDBVC:
             bvc = np.array(bvc_list)
             if np.max(np.abs(bvc)) != 0:
                 bvc = bvc / np.max(np.abs(bvc)) * scale
-            # Create a stamp column from the "time" float (epoch seconds)
+            # Create stamp column from "time" (epoch seconds)
             df_tr["stamp"] = pd.to_datetime(df_tr["time"], unit='s')
             self.metrics = pd.DataFrame({'stamp': df_tr["stamp"], 'bvc': bvc})
             return self.metrics
@@ -200,7 +203,7 @@ class ACIBVC:
         try:
             df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
             times = pd.to_datetime(df_tr['time'], unit='s')
-            times_numeric = times.astype(np.int64) // 10**9  # seconds
+            times_numeric = times.astype(np.int64) // 10**9  # seconds as integer
             intensities = self.estimate_intensity(times_numeric, self._kappa)
             df_tr = df_tr.iloc[:len(intensities)]
             df_tr['intensity'] = intensities
@@ -230,12 +233,43 @@ class ACIBVC:
             intensities.append(intensities[-1] * np.exp(-beta * delta_t) + 1)
         return np.array(intensities)
 
+class TradeClassification:
+    def __init__(self, df_tr):
+        self.df_tr = df_tr
+    def classify(self, method='bvc', window=60, window_type='time'):
+        if method != 'bvc':
+            raise ValueError("Only 'bvc' method is implemented.")
+        if window_type == 'time':
+            self.df_tr['group'] = (self.df_tr['time'].astype(np.int64) // window).astype(int)
+        elif window_type == 'vol':
+            self.df_tr['group'] = vol_bin(self.df_tr['vol'].values.astype(int), window)
+        else:
+            raise ValueError("window_type must be 'time' or 'vol'.")
+        grouped = self.df_tr.groupby('group')
+        group_keys = sorted(grouped.groups.keys())
+        last_prices = []
+        volumes = []
+        for g in group_keys:
+            chunk = grouped.get_group(g)
+            last_prices.append(chunk['price'].iloc[-1])
+            volumes.append(chunk['vol'].sum())
+        last_prices = np.array(last_prices, dtype=float)
+        volumes = np.array(volumes, dtype=float)
+        f_b = np.zeros_like(last_prices, dtype=float)
+        if len(last_prices) > 1:
+            f_b[1:] = fraction_buy(last_prices)
+        df_out = pd.DataFrame({'f_b': f_b, 'vol': volumes}, index=group_keys)
+        df_out['buy_vol'] = df_out['f_b'] * df_out['vol']
+        self.df_tr['Initiator'] = 0
+        return df_out
+
 # =============================================================================
 # MAIN DASHBOARD LOGIC
 # =============================================================================
 st.header("Section 1: Momentum, Skewness & BVC Analysis")
 
-symbol_bsi1 = st.sidebar.text_input("Enter Ticker Symbol (Sec 1)", value="BTC/USD", key="symbol_bsi1")
+symbol_bsi1 = st.sidebar.text_input("Enter Ticker Symbol (Sec 1)", 
+                                      value="BTC/USD", key="symbol_bsi1")
 st.write(f"Fetching data for: **{symbol_bsi1}** with a global lookback of **{global_lookback_minutes}** minutes and timeframe **{timeframe}**.")
 
 try:
@@ -297,17 +331,18 @@ df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
 
 global_min = df_merged['ScaledPrice'].min()
 global_max = df_merged['ScaledPrice'].max()
-abs_max = max(abs(df_merged['bvc'].min()), abs(df_merged['bvc'].max()))
+# Force a symmetric color scale between -1 and 1
+norm_bvc = plt.Normalize(-1, 1)
 
 # =============================================================================
 # PLOTTING SECTION - Price Chart Colored by Normalized BVC
 # =============================================================================
 fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-norm_bvc = plt.Normalize(-abs_max, abs_max)
 for i in range(len(df_merged) - 1):
     xvals = df_merged['stamp'].iloc[i:i+2]
     yvals = df_merged['ScaledPrice'].iloc[i:i+2]
     bvc_val = df_merged['bvc'].iloc[i]
+    # Use bwr colormap: negative -> blue, positive -> red
     color = plt.cm.bwr(norm_bvc(bvc_val))
     ax.plot(xvals, yvals, color=color, linewidth=1.2)
 ax.plot(df_merged['stamp'], df_merged['ScaledPrice_EMA'], color='black',
