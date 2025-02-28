@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from plotnine import *
 from scipy import stats
-from arch.univariate import ACD
 import ccxt
 from typing import Optional
 
@@ -94,7 +93,7 @@ class HawkesBVC:
         self.metrics = pd.DataFrame({'stamp': df['stamp'], 'bvc': bvc})
         return self.metrics
 
-# ACDBVC Class
+# ACDBVC Class with a custom simple ACD-like estimation
 class ACDBVC:
     def __init__(self, kappa: float):
         self._kappa = kappa
@@ -107,12 +106,15 @@ class ACDBVC:
             df_tr = df_tr.dropna(subset=['duration'])
             df_tr = df_tr[df_tr['duration'] > 0]
             if len(df_tr) < 10:
-                raise ValueError("Insufficient trade data for ACD model.")
-            model = ACD(df_tr['duration'], p=1, q=1, distribution='weibull')
-            result = model.fit(disp='off')
-            standardized_residuals = result.resid / result.resid.std()
-            df_tr = df_tr.iloc[:len(standardized_residuals)]
-            df_tr['standardized_residual'] = standardized_residuals
+                raise ValueError("Insufficient trade data for custom ACD model.")
+            
+            # Custom simple ACD-like model: using a basic standardization of durations.
+            mean_duration = df_tr['duration'].mean()
+            std_duration = df_tr['duration'].std()
+            if std_duration == 0:
+                std_duration = 1e-10
+            df_tr['standardized_residual'] = (df_tr['duration'] - mean_duration) / std_duration
+
             df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
             df_tr['label'] = -df_tr['standardized_residual'] * df_tr['price_change']
             df_tr['weighted_volume'] = df_tr['vol'] * df_tr['label']
@@ -128,7 +130,7 @@ class ACDBVC:
             })
             return self.metrics
         except Exception as e:
-            st.error(f"Error fitting ACD model: {e}")
+            st.error(f"Error fitting custom ACD model: {e}")
             return pd.DataFrame()
 
 # ACIBVC Class
@@ -251,6 +253,9 @@ def main():
         plt.setp(ax_bvc.get_xticklabels(), rotation=30, ha='right', fontsize=7)
         plt.setp(ax_bvc.get_yticklabels(), fontsize=7)
         st.pyplot(fig_bvc)
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
