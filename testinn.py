@@ -45,14 +45,6 @@ bvc_model = st.sidebar.selectbox(
     key="bvc_model"
 )
 
-# Map our timeframe strings to pandas frequency strings
-freq_mapping = {
-    "1m": "1T",
-    "5m": "5T",
-    "15m": "15T",
-    "1h": "1H"
-}
-
 @njit(cache=True)
 def ema(arr_in: np.ndarray, window: int, alpha: float = 0) -> np.ndarray:
     alpha = 3 / float(window + 1) if alpha == 0 else alpha
@@ -80,13 +72,10 @@ def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
             break
         since = last_timestamp + 1
     df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    # Use the mapped frequency here if needed:
-    df["time"] = pd.to_datetime(df["timestamp"], unit="ms").dt.floor(freq_mapping[timeframe])
     df["stamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     now = pd.to_datetime(now_ms, unit="ms")
     cutoff = now - pd.Timedelta(minutes=lookback_minutes)
-    df = df[df["stamp"] >= cutoff]
-    return df
+    return df[df["stamp"] >= cutoff]
 
 @st.cache_data
 def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
@@ -107,7 +96,7 @@ def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
     if not all_trades:
         raise ValueError(f"No trades returned from Kraken in the last {lookback_minutes} minutes.")
     df_tr = pd.DataFrame(all_trades)
-    df_tr['time'] = df_tr['timestamp'] / 1000.0
+    df_tr['time'] = pd.to_datetime(df_tr['timestamp'], unit='ms')
     df_tr['vol'] = df_tr['amount']
     df_tr = df_tr[['time', 'price', 'vol']].copy()
     df_tr.sort_values('time', inplace=True)
@@ -168,8 +157,7 @@ class HawkesBVC:
 
     def _label(self, r: float, sigma: float):
         if sigma > 0.0:
-            val = t.cdf(r / sigma, df=self._dof)
-            return 2 * val - 1.0
+            return 2 * t.cdf(r / sigma, df=self._dof) - 1.0
         else:
             return 0.0
 
@@ -183,13 +171,13 @@ class ACDBVC:
             df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
             df_tr['duration'] = df_tr['time'].diff().shift(-1)
             df_tr = df_tr.dropna(subset=['duration'])
-            df_tr = df_tr[df_tr['duration'] > 0]
+            df_tr = df_tr[df_tr['duration'] > pd.Timedelta(0)]
             if len(df_tr) < 10:
                 raise ValueError("Insufficient trade data for custom ACD model.")
             
-            mean_duration = df_tr['duration'].mean()
-            std_duration = df_tr['duration'].std() or 1e-10
-            df_tr['standardized_residual'] = (df_tr['duration'] - mean_duration) / std_duration
+            mean_duration = df_tr['duration'].mean().total_seconds()
+            std_duration = df_tr['duration'].std().total_seconds() or 1e-10
+            df_tr['standardized_residual'] = ((df_tr['duration'].dt.total_seconds() - mean_duration) / std_duration)
             df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
             df_tr['label'] = -df_tr['standardized_residual'] * df_tr['price_change']
             df_tr['weighted_volume'] = df_tr['vol'] * df_tr['label']
@@ -203,7 +191,7 @@ class ACDBVC:
             if np.max(np.abs(bvc)) != 0:
                 bvc = bvc / np.max(np.abs(bvc)) * scale
             self.metrics = pd.DataFrame({
-                'stamp': pd.to_datetime(df_tr['time'], unit='s'),
+                'stamp': pd.to_datetime(df_tr['time']),
                 'bvc': bvc
             })
             return self.metrics
@@ -219,8 +207,9 @@ class ACIBVC:
     def eval(self, df_tr: pd.DataFrame, scale=1e4) -> pd.DataFrame:
         try:
             df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
-            times = df_tr['time'].values
-            intensities = self.estimate_intensity(times, self._kappa)
+            times = pd.to_datetime(df_tr['time'])
+            times_numeric = times.astype(np.int64) // 10**9  # seconds
+            intensities = self.estimate_intensity(times_numeric, self._kappa)
             df_tr = df_tr.iloc[:len(intensities)]
             df_tr['intensity'] = intensities
             df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
@@ -236,7 +225,7 @@ class ACIBVC:
             if np.max(np.abs(bvc)) != 0:
                 bvc = bvc / np.max(np.abs(bvc)) * scale
             self.metrics = pd.DataFrame({
-                'stamp': pd.to_datetime(df_tr['time'], unit='s'),
+                'stamp': pd.to_datetime(df_tr['time']),
                 'bvc': bvc
             })
             return self.metrics
@@ -254,7 +243,7 @@ class ACIBVC:
 class TradeClassification:
     def __init__(self, df_tr):
         self.df_tr = df_tr
-    def classify(self, method='bvc', freq=0, window=60, window_type='time'):
+    def classify(self, method='bvc', window=60, window_type='time'):
         if method != 'bvc':
             raise ValueError("Only 'bvc' method is implemented.")
         if window_type == 'time':
@@ -269,10 +258,8 @@ class TradeClassification:
         volumes = []
         for g in group_keys:
             chunk = grouped.get_group(g)
-            last_price = chunk['price'].iloc[-1]
-            total_vol = chunk['vol'].sum()
-            last_prices.append(last_price)
-            volumes.append(total_vol)
+            last_prices.append(chunk['price'].iloc[-1])
+            volumes.append(chunk['vol'].sum())
         last_prices = np.array(last_prices, dtype=float)
         volumes = np.array(volumes, dtype=float)
         f_b = np.zeros_like(last_prices, dtype=float)
@@ -288,10 +275,10 @@ class TradeClassification:
 # =============================================================================
 st.header("Section 1: Momentum, Skewness & BVC Analysis")
 
-symbol_bsi1 = st.sidebar.text_input("Enter Ticker Symbol (Sec 1)", value="BTC/USD", key="symbol_bsi1")
+symbol_bsi1 = st.sidebar.text_input("Enter Ticker Symbol (Sec 1)", 
+                                      value="BTC/USD", key="symbol_bsi1")
 st.write(f"Fetching data for: **{symbol_bsi1}** with a global lookback of **{global_lookback_minutes}** minutes and timeframe **{timeframe}**.")
 
-# Fetch OHLC data
 try:
     prices_bsi = fetch_data(symbol=symbol_bsi1, timeframe=timeframe, lookback_minutes=global_lookback_minutes)
     st.write("Data range:", prices_bsi["stamp"].min(), "to", prices_bsi["stamp"].max())
@@ -321,44 +308,6 @@ if 'buyvolume' not in prices_bsi.columns or 'sellvolume' not in prices_bsi.colum
     prices_bsi['buyvolume'] = prices_bsi['volume'] * 0.5
     prices_bsi['sellvolume'] = prices_bsi['volume'] - prices_bsi['buyvolume']
 
-# Prepare skewness analysis DataFrame
-st.write("### Skewness Analysis")
-df_skew = prices_bsi.copy()
-df_skew['hlc3'] = (df_skew['high'] + df_skew['low'] + df_skew['close']) / 3.0
-SkewLength = 14
-alpha_val = 2.0 / (1.0 + SkewLength)
-df_skew['TrueRange'] = (np.abs(df_skew['hlc3'] - df_skew['hlc3'].shift(1, fill_value=df_skew['hlc3'].iloc[0]))
-                         / df_skew['hlc3'].shift(1, fill_value=df_skew['hlc3'].iloc[0]))
-dev_max_series = []
-dev_min_series = []
-dev_max_prev, dev_min_prev = 1.618, 1.618
-for i in range(len(df_skew)):
-    if i == 0:
-        dev_max_series.append(dev_max_prev)
-        dev_min_series.append(dev_min_prev)
-    else:
-        current_tr = df_skew['TrueRange'].iloc[i]
-        prior_hlc3 = df_skew['hlc3'].iloc[i - 1]
-        current_hlc3 = df_skew['hlc3'].iloc[i]
-        if current_hlc3 > prior_hlc3:
-            dev_max_prev = alpha_val * current_tr + (1 - alpha_val) * dev_max_prev
-        else:
-            dev_max_prev = alpha_val * 0 + (1 - alpha_val) * dev_max_prev
-        if current_hlc3 < prior_hlc3:
-            dev_min_prev = alpha_val * current_tr + (1 - alpha_val) * dev_min_prev
-        else:
-            dev_min_prev = alpha_val * 0 + (1 - alpha_val) * dev_min_prev
-        dev_max_series.append(dev_max_prev)
-        dev_min_series.append(dev_min_prev)
-df_skew['deviation_max'] = dev_max_series
-df_skew['deviation_min'] = dev_min_series
-df_skew['normalized_skew'] = (df_skew['deviation_max'] / df_skew['deviation_min'] - 1) * 3
-df_skew['normalized_z'] = (df_skew['normalized_skew'] + 3) / 6
-df_skew['normalized_z'] = df_skew['normalized_z'].ffill().bfill()
-df_skew['ScaledPrice'] = np.log(df_skew['close'] / df_skew['close'].iloc[0]) * 1e4
-ema_window = 10
-df_skew['ScaledPrice_EMA'] = ema(df_skew['ScaledPrice'].values, ema_window)
-
 # =============================================================================
 # BVC MODEL EVALUATION
 # =============================================================================
@@ -387,8 +336,6 @@ df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
 
 global_min = df_merged['ScaledPrice'].min()
 global_max = df_merged['ScaledPrice'].max()
-
-# Force symmetric color scale around zero
 abs_max = max(abs(df_merged['bvc'].min()), abs(df_merged['bvc'].max()))
 
 # =============================================================================
@@ -400,6 +347,7 @@ for i in range(len(df_merged) - 1):
     xvals = df_merged['stamp'].iloc[i:i+2]
     yvals = df_merged['ScaledPrice'].iloc[i:i+2]
     bvc_val = df_merged['bvc'].iloc[i]
+    # Use bwr colormap to show negatives in blue, positives in red
     color = plt.cm.bwr(norm_bvc(bvc_val))
     ax.plot(xvals, yvals, color=color, linewidth=1.2)
 ax.plot(df_merged['stamp'], df_merged['ScaledPrice_EMA'], color='black',
