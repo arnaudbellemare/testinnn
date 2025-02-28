@@ -143,7 +143,6 @@ class HawkesBVC:
         volume = df['volume']
         sigma = r.rolling(self._window).std().fillna(0.0)
         alpha_exp = np.exp(-self._kappa)
-        # Use t distribution for the student t cdf
         labels = np.array([self._label(r.iloc[i], sigma.iloc[i]) for i in range(len(r))])
         bvc = np.zeros(len(volume), dtype=float)
         current_bvc = 0.0
@@ -383,15 +382,29 @@ global_max = df_skew['ScaledPrice'].max()
 # PLOTTING SECTION
 # =============================================================================
 fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-norm_bvc = plt.Normalize(df_skew['bvc'].min(), df_skew['bvc'].max())
-for i in range(len(df_skew['stamp']) - 1):
-    xvals = df_skew['stamp'].iloc[i:i+2]
-    yvals = df_skew['ScaledPrice'].iloc[i:i+2]
-    bvc_val = df_skew['bvc'].iloc[i]
-    cmap_bvc = plt.cm.Blues if bvc_val >= 0 else plt.cm.Reds
-    color = cmap_bvc(norm_bvc(bvc_val))
-    ax.plot(xvals, yvals, color=color, linewidth=1)
+# Use different price coloring based on the BVC model selected
+if bvc_model == "Hawkes":
+    norm_bvc = plt.Normalize(df_skew['bvc'].min(), df_skew['bvc'].max())
+    for i in range(len(df_skew['stamp']) - 1):
+        xvals = df_skew['stamp'].iloc[i:i+2]
+        yvals = df_skew['ScaledPrice'].iloc[i:i+2]
+        bvc_val = df_skew['bvc'].iloc[i]
+        cmap_bvc = plt.cm.Blues if bvc_val >= 0 else plt.cm.Reds
+        color = cmap_bvc(norm_bvc(bvc_val))
+        ax.plot(xvals, yvals, color=color, linewidth=1)
+else:
+    # For ACD/ACI models, use a simple condition: green if price>=VWAP, else red
+    for i in range(len(df_skew['stamp']) - 1):
+        xvals = df_skew['stamp'].iloc[i:i+2]
+        yvals = df_skew['ScaledPrice'].iloc[i:i+2]
+        if df_skew['ScaledPrice'].iloc[i] >= df_skew['vwap_transformed'].iloc[i]:
+            price_color = 'green'
+        else:
+            price_color = 'red'
+        ax.plot(xvals, yvals, color=price_color, linewidth=1)
+
 ax.plot(df_skew['stamp'], df_skew['ScaledPrice_EMA'], color='gray', linewidth=0.7, label=f"EMA({ema_window})")
+# Plot VWAP with conditional coloring
 for i in range(len(df_skew['stamp']) - 1):
     xvals = df_skew['stamp'].iloc[i:i+2]
     if df_skew['ScaledPrice'].iloc[i] >= df_skew['vwap_transformed'].iloc[i]:
