@@ -30,18 +30,14 @@ lookback_options = {
     "2 Weeks": 20160,
     "1 Month": 43200
 }
-global_lookback_label = st.sidebar.selectbox("Select Global Lookback Period",
-                                               list(lookback_options.keys()),
-                                               key="global_lookback_label")
+global_lookback_label = st.sidebar.selectbox("Select Global Lookback Period", list(lookback_options.keys()), key="global_lookback_label")
 global_lookback_minutes = lookback_options[global_lookback_label]
-timeframe = st.sidebar.selectbox("Select Timeframe", ["1m", "5m", "15m", "1h"],
-                                 key="timeframe_widget")
-bvc_model = st.sidebar.selectbox("Select BVC Model", ["Hawkes", "ACD", "ACI"],
-                                 key="bvc_model")
+timeframe = st.sidebar.selectbox("Select Timeframe", ["1m", "5m", "15m", "1h"], key="timeframe_widget")
+bvc_model = st.sidebar.selectbox("Select BVC Model", ["Hawkes", "ACD", "ACI"], key="bvc_model")
 
 @njit(cache=True)
 def ema(arr_in: np.ndarray, window: int, alpha: float = 0) -> np.ndarray:
-    # If alpha not provided, use default formula: 3/(window+1)
+    # Use default alpha: 3/(window+1) if not provided
     alpha = 3 / float(window + 1) if alpha == 0 else alpha
     n = arr_in.size
     ewma = np.empty(n, dtype=np.float64)
@@ -362,12 +358,10 @@ else:
     st.error("Invalid BVC model selection.")
     st.stop()
 
-# Merge BVC metrics with price data
+# Merge BVC metrics with price data and normalize BVC for coloring
 df_merged = prices_bsi.reset_index().merge(bvc_metrics, on='stamp', how='left')
 df_merged.sort_values('stamp', inplace=True)
 df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
-
-# Normalize BVC for consistent coloring across models
 df_merged['bvc_norm'] = (df_merged['bvc'] - df_merged['bvc'].min()) / (df_merged['bvc'].max() - df_merged['bvc'].min())
 global_min = df_merged['ScaledPrice'].min()
 global_max = df_merged['ScaledPrice'].max()
@@ -380,7 +374,6 @@ norm_bvc = plt.Normalize(0, 1)
 for i in range(len(df_merged) - 1):
     xvals = df_merged['stamp'].iloc[i:i+2]
     yvals = df_merged['ScaledPrice'].iloc[i:i+2]
-    # Use the normalized bvc for coloring regardless of the model
     norm_val = df_merged['bvc_norm'].iloc[i]
     cmap_bvc = plt.cm.Blues if df_merged['bvc'].iloc[i] >= 0 else plt.cm.Reds
     color = cmap_bvc(norm_bvc(norm_val))
