@@ -46,7 +46,7 @@ def ema(arr_in: np.ndarray, window: int, alpha: float = 0) -> np.ndarray:
     ewma = np.empty(n, dtype=np.float64)
     ewma[0] = arr_in[0]
     for i in range(1, n):
-        ewma[i] = (arr_in[i] * alpha) + (ewma[i - 1] * (1 - alpha))
+        ewma[i] = (arr_in[i] * alpha) + (ewma[i-1] * (1 - alpha))
     return ewma
 
 def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
@@ -162,6 +162,7 @@ class ACDBVC:
     def eval(self, df_tr: pd.DataFrame, scale=1e4) -> pd.DataFrame:
         try:
             df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
+            # "time" is in seconds (float)
             df_tr['duration'] = df_tr['time'].diff().shift(-1)
             df_tr = df_tr.dropna(subset=['duration'])
             df_tr = df_tr[df_tr['duration'] > 0]
@@ -183,7 +184,6 @@ class ACDBVC:
             bvc = np.array(bvc_list)
             if np.max(np.abs(bvc)) != 0:
                 bvc = bvc / np.max(np.abs(bvc)) * scale
-            # Convert "time" (seconds) to datetime for merging
             df_tr["stamp"] = pd.to_datetime(df_tr["time"], unit='s')
             self.metrics = pd.DataFrame({'stamp': df_tr["stamp"], 'bvc': bvc})
             return self.metrics
@@ -235,7 +235,7 @@ class ACIBVC:
 # =============================================================================
 st.header("Section 1: Momentum, Skewness & BVC Analysis")
 
-symbol_bsi1 = st.sidebar.text_input("Enter Ticker Symbol (Sec 1)", 
+symbol_bsi1 = st.sidebar.text_input("Enter Ticker Symbol (Sec 1)",
                                       value="BTC/USD", key="symbol_bsi1")
 st.write(f"Fetching data for: **{symbol_bsi1}** with a global lookback of **{global_lookback_minutes}** minutes and timeframe **{timeframe}**.")
 
@@ -298,7 +298,7 @@ df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
 
 global_min = df_merged['ScaledPrice'].min()
 global_max = df_merged['ScaledPrice'].max()
-# Use a fixed normalization range from -1 to 1 for the gradient
+# Fixed normalization range: -1 to 1
 norm_bvc = plt.Normalize(-1, 1)
 
 # =============================================================================
