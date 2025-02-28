@@ -108,7 +108,7 @@ class ACDBVC:
             if len(df_tr) < 10:
                 raise ValueError("Insufficient trade data for custom ACD model.")
             
-            # Custom simple ACD-like model: using a basic standardization of durations.
+            # Custom simple ACD-like model: standardize durations
             mean_duration = df_tr['duration'].mean()
             std_duration = df_tr['duration'].std()
             if std_duration == 0:
@@ -257,5 +257,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-if __name__ == "__main__":
-    main()
