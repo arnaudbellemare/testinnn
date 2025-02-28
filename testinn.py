@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import ccxt
 from numba import njit
-from scipy.stats import norm, t
+from scipy.stats import norm, t, studentt
 from plotnine import ggplot, aes, geom_line, labs, theme_minimal, theme
 
 # =============================================================================
@@ -30,20 +30,14 @@ lookback_options = {
     "2 Weeks": 20160,
     "1 Month": 43200
 }
-global_lookback_label = st.sidebar.selectbox(
-    "Select Global Lookback Period",
-    list(lookback_options.keys()),
-    key="global_lookback_label"
-)
+global_lookback_label = st.sidebar.selectbox("Select Global Lookback Period",
+                                               list(lookback_options.keys()),
+                                               key="global_lookback_label")
 global_lookback_minutes = lookback_options[global_lookback_label]
-timeframe = st.sidebar.selectbox(
-    "Select Timeframe", ["1m", "5m", "15m", "1h"],
-    key="timeframe_widget"
-)
-bvc_model = st.sidebar.selectbox(
-    "Select BVC Model", ["Hawkes", "ACD", "ACI"],
-    key="bvc_model"
-)
+timeframe = st.sidebar.selectbox("Select Timeframe", ["1m", "5m", "15m", "1h"],
+                                 key="timeframe_widget")
+bvc_model = st.sidebar.selectbox("Select BVC Model", ["Hawkes", "ACD", "ACI"],
+                                 key="bvc_model")
 
 @njit(cache=True)
 def ema(arr_in: np.ndarray, window: int, alpha: float = 0) -> np.ndarray:
@@ -61,7 +55,7 @@ def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
     cutoff_ts = now_ms - lookback_minutes * 60 * 1000
     all_ohlcv = []
     since = cutoff_ts
-    max_limit = 1440
+    max_limit = 1440  # Kraken returns max 1440 candles per request
     while True:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=max_limit)
         if not ohlcv:
@@ -75,7 +69,8 @@ def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
     df["stamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     now = pd.to_datetime(now_ms, unit="ms")
     cutoff = now - pd.Timedelta(minutes=lookback_minutes)
-    return df[df["stamp"] >= cutoff]
+    df = df[df["stamp"] >= cutoff]
+    return df
 
 @st.cache_data
 def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
@@ -96,7 +91,7 @@ def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
     if not all_trades:
         raise ValueError(f"No trades returned from Kraken in the last {lookback_minutes} minutes.")
     df_tr = pd.DataFrame(all_trades)
-    df_tr['time'] = pd.to_datetime(df_tr['timestamp'], unit='ms')
+    df_tr['time'] = df_tr['timestamp'] / 1000.0
     df_tr['vol'] = df_tr['amount']
     df_tr = df_tr[['time', 'price', 'vol']].copy()
     df_tr.sort_values('time', inplace=True)
@@ -112,7 +107,8 @@ def fraction_buy(prices):
     if std_ == 0:
         return np.zeros_like(dp)
     z = (dp - mean_) / std_
-    return norm.cdf(z)
+    f_b = norm.cdf(z)
+    return f_b
 
 def vol_bin(volumes, w):
     group = np.zeros_like(volumes, dtype=int)
@@ -161,6 +157,7 @@ class HawkesBVC:
         else:
             return 0.0
 
+# For ACD and ACI we use similar plotting logic to color the price line.
 class ACDBVC:
     def __init__(self, kappa: float):
         self._kappa = kappa
@@ -171,13 +168,15 @@ class ACDBVC:
             df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
             df_tr['duration'] = df_tr['time'].diff().shift(-1)
             df_tr = df_tr.dropna(subset=['duration'])
-            df_tr = df_tr[df_tr['duration'] > pd.Timedelta(0)]
+            # Ensure duration is in seconds
+            df_tr['duration'] = df_tr['duration'].dt.total_seconds()
+            df_tr = df_tr[df_tr['duration'] > 0]
             if len(df_tr) < 10:
                 raise ValueError("Insufficient trade data for custom ACD model.")
             
-            mean_duration = df_tr['duration'].mean().total_seconds()
-            std_duration = df_tr['duration'].std().total_seconds() or 1e-10
-            df_tr['standardized_residual'] = ((df_tr['duration'].dt.total_seconds() - mean_duration) / std_duration)
+            mean_duration = df_tr['duration'].mean()
+            std_duration = df_tr['duration'].std() or 1e-10
+            df_tr['standardized_residual'] = ((df_tr['duration'] - mean_duration) / std_duration)
             df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
             df_tr['label'] = -df_tr['standardized_residual'] * df_tr['price_change']
             df_tr['weighted_volume'] = df_tr['vol'] * df_tr['label']
@@ -240,36 +239,6 @@ class ACIBVC:
             intensities.append(intensities[-1] * np.exp(-beta * delta_t) + 1)
         return np.array(intensities)
 
-class TradeClassification:
-    def __init__(self, df_tr):
-        self.df_tr = df_tr
-    def classify(self, method='bvc', window=60, window_type='time'):
-        if method != 'bvc':
-            raise ValueError("Only 'bvc' method is implemented.")
-        if window_type == 'time':
-            self.df_tr['group'] = (self.df_tr['time'] // window).astype(int)
-        elif window_type == 'vol':
-            self.df_tr['group'] = vol_bin(self.df_tr['vol'].values.astype(int), window)
-        else:
-            raise ValueError("window_type must be 'time' or 'vol'.")
-        grouped = self.df_tr.groupby('group')
-        group_keys = sorted(grouped.groups.keys())
-        last_prices = []
-        volumes = []
-        for g in group_keys:
-            chunk = grouped.get_group(g)
-            last_prices.append(chunk['price'].iloc[-1])
-            volumes.append(chunk['vol'].sum())
-        last_prices = np.array(last_prices, dtype=float)
-        volumes = np.array(volumes, dtype=float)
-        f_b = np.zeros_like(last_prices, dtype=float)
-        if len(last_prices) > 1:
-            f_b[1:] = fraction_buy(last_prices)
-        df_out = pd.DataFrame({'f_b': f_b, 'vol': volumes}, index=group_keys)
-        df_out['buy_vol'] = df_out['f_b'] * df_out['vol']
-        self.df_tr['Initiator'] = 0
-        return df_out
-
 # =============================================================================
 # MAIN DASHBOARD LOGIC
 # =============================================================================
@@ -290,11 +259,9 @@ prices_bsi.dropna(subset=['close', 'volume'], inplace=True)
 prices_bsi['stamp'] = pd.to_datetime(prices_bsi['stamp'])
 prices_bsi.set_index('stamp', inplace=True)
 
-# Compute scaled price and EMA
 prices_bsi['ScaledPrice'] = np.log(prices_bsi['close'] / prices_bsi['close'].iloc[0]) * 1e4
 prices_bsi['ScaledPrice_EMA'] = ema(prices_bsi['ScaledPrice'].values, window=10)
 
-# Compute VWAP
 prices_bsi['cum_vol'] = prices_bsi['volume'].cumsum()
 prices_bsi['cum_pv'] = (prices_bsi['close'] * prices_bsi['volume']).cumsum()
 prices_bsi['vwap'] = prices_bsi['cum_pv'] / prices_bsi['cum_vol']
@@ -309,27 +276,31 @@ if 'buyvolume' not in prices_bsi.columns or 'sellvolume' not in prices_bsi.colum
     prices_bsi['sellvolume'] = prices_bsi['volume'] - prices_bsi['buyvolume']
 
 # =============================================================================
-# BVC MODEL EVALUATION
+# BVC MODEL EVALUATION & MERGE
 # =============================================================================
 if bvc_model == "Hawkes":
     model = HawkesBVC(window=20, kappa=0.1)
     bvc_metrics = model.eval(prices_bsi.reset_index())
-elif bvc_model in ["ACD", "ACI"]:
+elif bvc_model == "ACD":
     try:
         trades_df = fetch_trades_kraken(symbol=symbol_bsi1, lookback_minutes=global_lookback_minutes)
     except Exception as e:
         st.error(f"Error fetching trade data: {e}")
         st.stop()
-    if bvc_model == "ACD":
-        model = ACDBVC(kappa=0.1)
-    else:
-        model = ACIBVC(kappa=0.1)
+    model = ACDBVC(kappa=0.1)
+    bvc_metrics = model.eval(trades_df)
+elif bvc_model == "ACI":
+    try:
+        trades_df = fetch_trades_kraken(symbol=symbol_bsi1, lookback_minutes=global_lookback_minutes)
+    except Exception as e:
+        st.error(f"Error fetching trade data: {e}")
+        st.stop()
+    model = ACIBVC(kappa=0.1)
     bvc_metrics = model.eval(trades_df)
 else:
     st.error("Invalid BVC model selection.")
     st.stop()
 
-# Merge BVC metrics with price data
 df_merged = prices_bsi.reset_index().merge(bvc_metrics, on='stamp', how='left')
 df_merged.sort_values('stamp', inplace=True)
 df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
@@ -347,7 +318,7 @@ for i in range(len(df_merged) - 1):
     xvals = df_merged['stamp'].iloc[i:i+2]
     yvals = df_merged['ScaledPrice'].iloc[i:i+2]
     bvc_val = df_merged['bvc'].iloc[i]
-    # Use bwr colormap to show negatives in blue, positives in red
+    # Use bwr colormap: negative values blue, positive red
     color = plt.cm.bwr(norm_bvc(bvc_val))
     ax.plot(xvals, yvals, color=color, linewidth=1.2)
 ax.plot(df_merged['stamp'], df_merged['ScaledPrice_EMA'], color='black',
@@ -381,3 +352,4 @@ ax_bvc.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
 plt.setp(ax_bvc.get_xticklabels(), rotation=30, ha='right', fontsize=7)
 plt.setp(ax_bvc.get_yticklabels(), fontsize=7)
 st.pyplot(fig_bvc)
+
