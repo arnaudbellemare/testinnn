@@ -350,27 +350,59 @@ df_skew['ScaledPrice_EMA'] = ema(df_skew['ScaledPrice'].values, ema_window)
 # =============================================================================
 # BVC MODEL EVALUATION
 # =============================================================================
+bvc_metrics = None
+
+# For Hawkes model, use OHLCV data
 if bvc_model == "Hawkes":
     model = HawkesBVC(window=20, kappa=0.1)
     bvc_metrics = model.eval(prices_bsi.reset_index())
+# For ACD and ACI models, fetch and use trade data
 elif bvc_model in ["ACD", "ACI"]:
     try:
         trades_df = fetch_trades_kraken(symbol=symbol_bsi1, lookback_minutes=global_lookback_minutes)
+        
+        # Create price mapping dataframe for matching with OHLCV data
+        price_mapping = pd.DataFrame({
+            'timestamp': pd.to_datetime(trades_df['time'], unit='s'),
+            'trade_price': trades_df['price']
+        })
+        
+        if bvc_model == "ACD":
+            model = ACDBVC(kappa=0.1)
+        else:  # ACI model
+            model = ACIBVC(kappa=0.1)
+            
+        bvc_metrics = model.eval(trades_df)
+        
+        # Ensure we have BVC metrics
+        if bvc_metrics.empty:
+            st.error(f"Failed to calculate {bvc_model} metrics. Falling back to Hawkes model.")
+            model = HawkesBVC(window=20, kappa=0.1)
+            bvc_metrics = model.eval(prices_bsi.reset_index())
     except Exception as e:
-        st.error(f"Error fetching trade data: {e}")
-        st.stop()
-    if bvc_model == "ACD":
-        model = ACDBVC(kappa=0.1)
-    else:
-        model = ACIBVC(kappa=0.1)
-    bvc_metrics = model.eval(trades_df)
+        st.error(f"Error in {bvc_model} calculation: {e}. Falling back to Hawkes model.")
+        model = HawkesBVC(window=20, kappa=0.1)
+        bvc_metrics = model.eval(prices_bsi.reset_index())
 else:
     st.error("Invalid BVC model selection.")
     st.stop()
 
-# Merge BVC metrics with price data
-df_merged = prices_bsi.reset_index().merge(bvc_metrics, on='stamp', how='left')
+# Merge BVC metrics with price data - using proper time-based merging for all models
+df_merged = prices_bsi.reset_index().copy()
+
+# Sort both dataframes by timestamp before merging
 df_merged.sort_values('stamp', inplace=True)
+bvc_metrics.sort_values('stamp', inplace=True)
+
+# Perform a proper merge based on timestamps
+df_merged = pd.merge_asof(
+    df_merged, 
+    bvc_metrics,
+    on='stamp',
+    direction='nearest'
+)
+
+# Handle any NaN values in the BVC column
 df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
 
 global_min = df_merged['ScaledPrice'].min()
@@ -380,21 +412,32 @@ global_max = df_merged['ScaledPrice'].max()
 # PLOTTING SECTION - Price Chart Colored by Normalized BVC
 # =============================================================================
 fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
+
+# Create a proper color normalization
 norm_bvc = plt.Normalize(df_merged['bvc'].min(), df_merged['bvc'].max())
+
+# Plot price line segments with colors based on BVC values
 for i in range(len(df_merged) - 1):
     xvals = df_merged['stamp'].iloc[i:i+2]
     yvals = df_merged['ScaledPrice'].iloc[i:i+2]
     bvc_val = df_merged['bvc'].iloc[i]
+    
+    # Use Blues for positive BVC (buy volume), Reds for negative BVC (sell volume)
     cmap_bvc = plt.cm.Blues if bvc_val >= 0 else plt.cm.Reds
-    color = cmap_bvc(norm_bvc(bvc_val))
+    color = cmap_bvc(abs(norm_bvc(bvc_val)))
+    
     ax.plot(xvals, yvals, color=color, linewidth=1)
+
+# Add EMA and VWAP lines
 ax.plot(df_merged['stamp'], df_merged['ScaledPrice_EMA'], color='gray',
         linewidth=0.7, label=f"EMA({ema_window})")
 ax.plot(df_merged['stamp'], df_merged['vwap_transformed'], color='gray',
-        linewidth=0.7, label="VWAP")
+        linewidth=0.7, linestyle='--', label="VWAP")
+
+# Add a title that indicates which BVC model is being used
 ax.set_xlabel("Time", fontsize=8)
 ax.set_ylabel("ScaledPrice", fontsize=8)
-ax.set_title("Price with EMA & VWAP (Colored by BVC)", fontsize=10)
+ax.set_title(f"Price with EMA & VWAP (Colored by {bvc_model} BVC)", fontsize=10)
 ax.legend(fontsize=7)
 ax.xaxis.set_major_locator(mdates.AutoDateLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
@@ -413,10 +456,9 @@ ax_bvc.plot(bvc_metrics['stamp'], bvc_metrics['bvc'], color="blue", linewidth=0.
 ax_bvc.set_xlabel("Time", fontsize=8)
 ax_bvc.set_ylabel("BVC", fontsize=8)
 ax_bvc.legend(fontsize=7)
-ax_bvc.set_title("BVC Over Time", fontsize=10)
+ax_bvc.set_title(f"{bvc_model} BVC Over Time", fontsize=10)
 ax_bvc.xaxis.set_major_locator(mdates.AutoDateLocator())
 ax_bvc.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
 plt.setp(ax_bvc.get_xticklabels(), rotation=30, ha='right', fontsize=7)
 plt.setp(ax_bvc.get_yticklabels(), fontsize=7)
 st.pyplot(fig_bvc)
-
