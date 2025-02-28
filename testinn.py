@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import ccxt
 from numba import njit
-from scipy.stats import norm, studentt
+from scipy.stats import t as norm, studentt
 from matplotlib.collections import LineCollection
 from numpy.typing import NDArray
 from typing import Optional
