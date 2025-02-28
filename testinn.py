@@ -13,6 +13,8 @@ from plotnine import ggplot, aes, geom_line, labs, theme_minimal, theme
 # =============================================================================
 st.title("CNO Dashboard")
 st.write(f"Welcome, {st.session_state['username']}!")
+if "username" not in st.session_state:
+    st.session_state["username"] = "Guest"
 
 # =============================================================================
 # GLOBAL VARIABLES & HELPER FUNCTIONS
