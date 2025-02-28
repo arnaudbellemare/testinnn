@@ -90,7 +90,6 @@ def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
     return df_tr
 
 def fraction_buy(prices):
-    """Fraction of 'buy' volume estimated by normal CDF of log returns."""
     dp = np.diff(np.log(prices))
     if len(dp) < 2:
         return np.zeros_like(dp)
@@ -157,7 +156,6 @@ class ACDBVC:
 
     def eval(self, df_tr: pd.DataFrame, scale=1e4) -> pd.DataFrame:
         df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
-        # duration is time between trades
         df_tr['duration'] = df_tr['time'].diff().shift(-1)
         df_tr = df_tr.dropna(subset=['duration'])
         df_tr = df_tr[df_tr['duration'] > 0]
@@ -169,7 +167,6 @@ class ACDBVC:
         df_tr['standardized_residual'] = (df_tr['duration'] - mean_duration) / std_duration
         df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
 
-        # Negative sign for standardized_residual so that longer intervals intensify negativity
         df_tr['label'] = -df_tr['standardized_residual'] * df_tr['price_change']
         df_tr['weighted_volume'] = df_tr['vol'] * df_tr['label']
 
@@ -195,11 +192,9 @@ class ACIBVC:
     def eval(self, df_tr: pd.DataFrame, scale=1e4) -> pd.DataFrame:
         df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
         times = pd.to_datetime(df_tr['time'], unit='s')
-        # Convert to integer seconds
         times_numeric = times.astype(np.int64) // 10**9
         intensities = self.estimate_intensity(times_numeric, self._kappa)
 
-        # Keep consistent length
         df_tr = df_tr.iloc[:len(intensities)]
         df_tr['intensity'] = intensities
         df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
@@ -221,7 +216,6 @@ class ACIBVC:
         return self.metrics
 
     def estimate_intensity(self, times: np.ndarray, beta: float) -> np.ndarray:
-        """Simple exponential kernel for arrival intensities."""
         intensities = [0.0]
         for i in range(1, len(times)):
             delta_t = times[i] - times[i-1]
@@ -233,7 +227,6 @@ class TradeClassification:
         self.df_tr = df_tr
 
     def classify(self, method='bvc', freq=0, window=60, window_type='time'):
-        # For demonstration, only 'bvc' method is implemented here.
         if method != 'bvc':
             raise ValueError("Only 'bvc' method is implemented.")
         if window_type == 'time':
@@ -242,28 +235,23 @@ class TradeClassification:
             self.df_tr['group'] = vol_bin(self.df_tr['vol'].values.astype(int), window)
         else:
             raise ValueError("window_type must be 'time' or 'vol'.")
-
         grouped = self.df_tr.groupby('group')
         group_keys = sorted(grouped.groups.keys())
         last_prices = []
         volumes = []
-
         for g in group_keys:
             chunk = grouped.get_group(g)
             last_prices.append(chunk['price'].iloc[-1])
             volumes.append(chunk['vol'].sum())
-
         last_prices = np.array(last_prices, dtype=float)
         volumes = np.array(volumes, dtype=float)
         f_b = np.zeros_like(last_prices, dtype=float)
         if len(last_prices) > 1:
             f_b[1:] = fraction_buy(last_prices)
-
         df_out = pd.DataFrame({'f_b': f_b, 'vol': volumes}, index=group_keys)
         df_out['buy_vol'] = df_out['f_b'] * df_out['vol']
         self.df_tr['Initiator'] = 0
         return df_out
-
 
 # =============================================================================
 # SECTION 1: Momentum, Skewness & BVC Analysis
@@ -348,8 +336,6 @@ if bvc_model_choice == "Hawkes BVC":
     bvc_model = HawkesBVC(window=20, kappa=0.1)
     bvc_metrics = bvc_model.eval(prices_bsi.reset_index())
 elif bvc_model_choice == "ACD BVC":
-    # Typically you'd fetch trades for ACD model, not OHLC
-    # But for demo, we'll reuse the existing data or fetch trades instead:
     try:
         df_trades = fetch_trades_kraken(symbol=symbol_bsi1, lookback_minutes=global_lookback_minutes)
     except Exception as e:
@@ -358,7 +344,6 @@ elif bvc_model_choice == "ACD BVC":
     acd_model = ACDBVC(kappa=0.1)
     bvc_metrics = acd_model.eval(df_trades)
 elif bvc_model_choice == "ACI BVC":
-    # Typically you'd fetch trades for ACI model
     try:
         df_trades = fetch_trades_kraken(symbol=symbol_bsi1, lookback_minutes=global_lookback_minutes)
     except Exception as e:
@@ -375,14 +360,26 @@ df_skew = df_skew.merge(bvc_metrics, on='stamp', how='left')
 global_min = df_skew['ScaledPrice'].min()
 global_max = df_skew['ScaledPrice'].max()
 
-# Plot the Price with gradient based on BVC
+# ---------------------------------------------------------------------------
+# Enforce a shared color range for consistent coloring across all models:
+# Adjust these as you see fit (e.g., -2 to 2, -1 to 1, etc.).
+SHARED_MIN, SHARED_MAX = -1.0, 1.0
+# ---------------------------------------------------------------------------
+
 fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-norm_bvc = plt.Normalize(df_skew['bvc'].min(), df_skew['bvc'].max())
+
+# Instead of normalizing by each model’s min/max, we use the shared range:
+norm_bvc = plt.Normalize(SHARED_MIN, SHARED_MAX)
 
 for i in range(len(df_skew['stamp']) - 1):
     xvals = df_skew['stamp'].iloc[i:i+2]
     yvals = df_skew['ScaledPrice'].iloc[i:i+2]
+
+    # We safely fill NaNs with 0.0 so that None doesn't crash the color map:
     bvc_val = df_skew['bvc'].iloc[i]
+    if pd.isna(bvc_val):
+        bvc_val = 0.0
+
     cmap_bvc = plt.cm.Blues if bvc_val >= 0 else plt.cm.Reds
     color = cmap_bvc(norm_bvc(bvc_val))
     ax.plot(xvals, yvals, color=color, linewidth=1)
@@ -391,7 +388,10 @@ ax.plot(df_skew['stamp'], df_skew['ScaledPrice_EMA'], color='gray', linewidth=0.
 
 for i in range(len(df_skew['stamp']) - 1):
     xvals = df_skew['stamp'].iloc[i:i+2]
-    if df_skew['ScaledPrice'].iloc[i] >= df_skew['vwap_transformed'].iloc[i]:
+    price_val = df_skew['ScaledPrice'].iloc[i]
+    vwap_val = df_skew['vwap_transformed'].iloc[i]
+
+    if price_val >= vwap_val:
         vwap_color = 'blue'
     else:
         vwap_color = 'red'
@@ -414,7 +414,8 @@ st.pyplot(fig)
 
 # Plot the chosen BVC curve
 fig_bvc, ax_bvc = plt.subplots(figsize=(10, 3), dpi=120)
-ax_bvc.plot(bvc_metrics['stamp'], bvc_metrics['bvc'], color="blue", linewidth=0.8, label=f"{bvc_model_choice}")
+ax_bvc.plot(bvc_metrics['stamp'], bvc_metrics['bvc'],
+            color="blue", linewidth=0.8, label=f"{bvc_model_choice}")
 ax_bvc.set_xlabel("Time", fontsize=8)
 ax_bvc.set_ylabel("BVC", fontsize=8)
 ax_bvc.legend(fontsize=7)
