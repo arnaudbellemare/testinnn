@@ -4,5 +4,5 @@ numpy
 matplotlib
 plotnine
 scipy
-arch==4.20.0
+arch
 ccxt
