@@ -30,30 +30,24 @@ lookback_options = {
     "2 Weeks": 20160,
     "1 Month": 43200
 }
-global_lookback_label = st.sidebar.selectbox(
-    "Select Global Lookback Period",
-    list(lookback_options.keys()),
-    key="global_lookback_label"
-)
+global_lookback_label = st.sidebar.selectbox("Select Global Lookback Period",
+                                               list(lookback_options.keys()),
+                                               key="global_lookback_label")
 global_lookback_minutes = lookback_options[global_lookback_label]
-timeframe = st.sidebar.selectbox(
-    "Select Timeframe", ["1m", "5m", "15m", "1h"],
-    key="timeframe_widget"
-)
-bvc_model = st.sidebar.selectbox(
-    "Select BVC Model", ["Hawkes", "ACD", "ACI"],
-    key="bvc_model"
-)
+timeframe = st.sidebar.selectbox("Select Timeframe", ["1m", "5m", "15m", "1h"],
+                                 key="timeframe_widget")
+bvc_model = st.sidebar.selectbox("Select BVC Model", ["Hawkes", "ACD", "ACI"],
+                                 key="bvc_model")
 
 @njit(cache=True)
 def ema(arr_in: np.ndarray, window: int, alpha: float = 0) -> np.ndarray:
-    # If alpha not provided, use default formula: 3/(window+1)
+    # Default alpha = 3/(window+1)
     alpha = 3 / float(window + 1) if alpha == 0 else alpha
     n = arr_in.size
     ewma = np.empty(n, dtype=np.float64)
     ewma[0] = arr_in[0]
     for i in range(1, n):
-        ewma[i] = (arr_in[i] * alpha) + (ewma[i - 1] * (1 - alpha))
+        ewma[i] = (arr_in[i] * alpha) + (ewma[i-1] * (1 - alpha))
     return ewma
 
 @st.cache_data
@@ -77,8 +71,7 @@ def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
     df["stamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     now = pd.to_datetime(now_ms, unit="ms")
     cutoff = now - pd.Timedelta(minutes=lookback_minutes)
-    df = df[df["stamp"] >= cutoff]
-    return df
+    return df[df["stamp"] >= cutoff]
 
 @st.cache_data
 def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
@@ -130,7 +123,7 @@ def vol_bin(volumes, w):
     return group
 
 # =============================================================================
-# CLASSES FOR ANALYSIS
+# BVC MODEL CLASSES
 # =============================================================================
 class HawkesBVC:
     def __init__(self, window=20, kappa=0.1, dof=0.25):
@@ -140,36 +133,24 @@ class HawkesBVC:
         self.metrics = None
 
     def eval(self, df: pd.DataFrame, scale=1e4):
-        # df: OHLC data
         times = df['stamp']
         prices = df['close']
         r = np.log(prices / prices.iloc[0]).diff().fillna(0.0)
         volume = df['volume']
         sigma = r.rolling(self._window).std().fillna(0.0)
         alpha_exp = np.exp(-self._kappa)
-
-        def label_func(x, s):
-            if s > 0:
-                val = t.cdf(x / s, df=self._dof)
-                return 2*val - 1
-            return 0
-
-        labels = [label_func(x, s) for x, s in zip(r, sigma)]
-        wv = volume * labels
+        labels = [ (2 * t.cdf(r_val / sigma_val, df=self._dof) - 1) if sigma_val > 0 else 0
+                  for r_val, sigma_val in zip(r, sigma)]
         bvc = []
         current = 0.0
-        for val in wv:
-            current = current * alpha_exp + val
+        for wv in volume * np.array(labels):
+            current = current * alpha_exp + wv
             bvc.append(current)
         bvc = np.array(bvc)
         if bvc.max() != 0:
             bvc /= np.abs(bvc).max()
         bvc *= scale
-
-        self.metrics = pd.DataFrame({
-            'stamp': times,
-            'bvc': bvc
-        })
+        self.metrics = pd.DataFrame({'stamp': times, 'bvc': bvc})
         return self.metrics
 
 class ACDBVC:
@@ -184,14 +165,12 @@ class ACDBVC:
         df_tr = df_tr[df_tr['duration'] > 0]
         if len(df_tr) < 10:
             raise ValueError("Insufficient trade data for ACD model.")
-        
         mean_d = df_tr['duration'].mean()
         std_d = df_tr['duration'].std() or 1e-10
         df_tr['std_resid'] = (df_tr['duration'] - mean_d) / std_d
         df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
         df_tr['label'] = -df_tr['std_resid'] * df_tr['price_change']
         df_tr['weighted_vol'] = df_tr['vol'] * df_tr['label']
-
         alpha_exp = np.exp(-self._kappa)
         bvc_list = []
         current = 0.0
@@ -202,11 +181,8 @@ class ACDBVC:
         if bvc.max() != 0:
             bvc /= np.abs(bvc).max()
         bvc *= scale
-
-        self.metrics = pd.DataFrame({
-            'stamp': pd.to_datetime(df_tr['time'], unit='s'),
-            'bvc': bvc
-        })
+        self.metrics = pd.DataFrame({'stamp': pd.to_datetime(df_tr['time'], unit='s'),
+                                     'bvc': bvc})
         return self.metrics
 
 class ACIBVC:
@@ -223,7 +199,6 @@ class ACIBVC:
         df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
         df_tr['label'] = df_tr['intensity'] * df_tr['price_change']
         df_tr['weighted_vol'] = df_tr['vol'] * df_tr['label']
-
         alpha_exp = np.exp(-self._kappa)
         bvc_list = []
         current = 0.0
@@ -234,18 +209,15 @@ class ACIBVC:
         if bvc.max() != 0:
             bvc /= np.abs(bvc).max()
         bvc *= scale
-
-        self.metrics = pd.DataFrame({
-            'stamp': pd.to_datetime(df_tr['time'], unit='s'),
-            'bvc': bvc
-        })
+        self.metrics = pd.DataFrame({'stamp': pd.to_datetime(df_tr['time'], unit='s'),
+                                     'bvc': bvc})
         return self.metrics
 
     def estimate_intensity(self, times: np.ndarray, beta: float) -> np.ndarray:
         intensities = [0.0]
         for i in range(1, len(times)):
             dt = times[i] - times[i-1]
-            intensities.append(intensities[-1] * np.exp(-beta*dt) + 1)
+            intensities.append(intensities[-1] * np.exp(-beta * dt) + 1)
         return np.array(intensities)
 
 # =============================================================================
@@ -259,7 +231,7 @@ symbol_bsi1 = st.sidebar.text_input("Enter Ticker Symbol (Sec 1)",
 st.write(f"Fetching data for: **{symbol_bsi1}** with a global lookback of "
          f"**{global_lookback_minutes}** minutes and timeframe **{timeframe}**.")
 
-# 1) Fetch Candle Data
+# 1) Fetch OHLC (candle) data
 try:
     prices_bsi = fetch_data(symbol=symbol_bsi1,
                             timeframe=timeframe,
@@ -273,11 +245,11 @@ prices_bsi.dropna(subset=['close', 'volume'], inplace=True)
 prices_bsi['stamp'] = pd.to_datetime(prices_bsi['stamp'])
 prices_bsi.set_index('stamp', inplace=True)
 
-# 2) Compute Scaled Price & EMA
+# 2) Compute Scaled Price and EMA
 prices_bsi['ScaledPrice'] = np.log(prices_bsi['close'] / prices_bsi['close'].iloc[0]) * 1e4
 prices_bsi['ScaledPrice_EMA'] = ema(prices_bsi['ScaledPrice'].values, window=10)
 
-# 3) VWAP
+# 3) Compute VWAP
 prices_bsi['cum_vol'] = prices_bsi['volume'].cumsum()
 prices_bsi['cum_pv'] = (prices_bsi['close'] * prices_bsi['volume']).cumsum()
 prices_bsi['vwap'] = prices_bsi['cum_pv'] / prices_bsi['cum_vol']
@@ -287,13 +259,11 @@ if prices_bsi['vwap'].iloc[0] == 0 or not np.isfinite(prices_bsi['vwap'].iloc[0]
 else:
     prices_bsi['vwap_transformed'] = np.log(prices_bsi['vwap'] / prices_bsi['vwap'].iloc[0]) * 1e4
 
-# 4) Evaluate BVC
+# 4) Evaluate BVC based on the selected model
 if bvc_model == "Hawkes":
     model = HawkesBVC(window=20, kappa=0.1)
-    bvc_metrics = model.eval(prices_bsi.reset_index())  # uses same candle timestamps
-    # No resampling needed since Hawkes is candle-based
+    bvc_metrics = model.eval(prices_bsi.reset_index())  # timestamps align with candles
 else:
-    # ACD or ACI -> trades
     try:
         trades_df = fetch_trades_kraken(symbol=symbol_bsi1,
                                         lookback_minutes=global_lookback_minutes)
@@ -304,30 +274,26 @@ else:
         model = ACDBVC(kappa=0.1)
     else:
         model = ACIBVC(kappa=0.1)
-
     bvc_metrics = model.eval(trades_df)
-    # Resample to match candle timeframe so each candle can have a BVC value
-    # 1) Make stamp the index
+    # Resample the trade-based BVC to candle timestamps
     bvc_metrics.set_index('stamp', inplace=True)
-    # 2) Resample by the same timeframe as your OHLC data. If timeframe='1m', do '1min'
-    #    If timeframe='5m', do '5min', etc. We'll do a small mapping:
-    freq_map = {
-        '1m': '1min',
-        '5m': '5min',
-        '15m': '15min',
-        '1h': '1H'
-    }
-    resample_freq = freq_map.get(timeframe, '1min')
-    bvc_metrics = bvc_metrics.resample(resample_freq).ffill()  # forward-fill BVC
+    candle_index = prices_bsi.reset_index()['stamp']
+    # Reindex and interpolate
+    bvc_metrics = bvc_metrics.reindex(candle_index).interpolate(method='time')
     bvc_metrics.reset_index(inplace=True)
+    bvc_metrics.rename(columns={'index':'stamp'}, inplace=True)
 
-# 5) Merge BVC with Candle Data
+# 5) Merge BVC with candle data
 df_merged = prices_bsi.reset_index().merge(bvc_metrics, on='stamp', how='left')
 df_merged.sort_values('stamp', inplace=True)
-# Fill any remaining NaNs
 df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0.0)
 
-# 6) Plot the Price Chart with BVC-based Coloring
+global_min = df_merged['ScaledPrice'].min()
+global_max = df_merged['ScaledPrice'].max()
+
+# =============================================================================
+# PLOTTING SECTION - Price Chart Colored by Normalized BVC
+# =============================================================================
 fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
 norm_bvc = plt.Normalize(df_merged['bvc'].min(), df_merged['bvc'].max())
 
@@ -335,16 +301,14 @@ for i in range(len(df_merged) - 1):
     xvals = df_merged['stamp'].iloc[i:i+2]
     yvals = df_merged['ScaledPrice'].iloc[i:i+2]
     bvc_val = df_merged['bvc'].iloc[i]
-    # Blue if bvc >= 0, Red if bvc < 0
     cmap_bvc = plt.cm.Blues if bvc_val >= 0 else plt.cm.Reds
     color = cmap_bvc(norm_bvc(bvc_val))
     ax.plot(xvals, yvals, color=color, linewidth=1)
 
-# Plot EMA & VWAP
-ax.plot(df_merged['stamp'], df_merged['ScaledPrice_EMA'],
-        color='gray', linewidth=1, label="EMA(10)")
-ax.plot(df_merged['stamp'], df_merged['vwap_transformed'],
-        color='gray', linewidth=1, label="VWAP")
+ax.plot(df_merged['stamp'], df_merged['ScaledPrice_EMA'], color='gray',
+        linewidth=1, label="EMA(10)")
+ax.plot(df_merged['stamp'], df_merged['vwap_transformed'], color='gray',
+        linewidth=1, label="VWAP")
 
 ax.set_xlabel("Time", fontsize=8)
 ax.set_ylabel("ScaledPrice", fontsize=8)
@@ -354,17 +318,15 @@ ax.xaxis.set_major_locator(mdates.AutoDateLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
 plt.setp(ax.get_xticklabels(), rotation=30, ha='right', fontsize=7)
 plt.setp(ax.get_yticklabels(), fontsize=7)
-price_min = df_merged['ScaledPrice'].min()
-price_max = df_merged['ScaledPrice'].max()
-margin = (price_max - price_min) * 0.05
-ax.set_ylim(price_min - margin, price_max + margin)
+margin = (global_max - global_min) * 0.05
+ax.set_ylim(global_min - margin, global_max + margin)
 plt.tight_layout()
 st.pyplot(fig)
 
-# 7) Plot BVC
+# 6) Plot the BVC over time
 fig_bvc, ax_bvc = plt.subplots(figsize=(10, 3), dpi=120)
 ax_bvc.plot(df_merged['stamp'], df_merged['bvc'], color="blue",
-            linewidth=0.8, label=f"BVC ({bvc_model})")
+            linewidth=1, label=f"BVC ({bvc_model})")
 ax_bvc.set_xlabel("Time", fontsize=8)
 ax_bvc.set_ylabel("BVC", fontsize=8)
 ax_bvc.legend(fontsize=7)
