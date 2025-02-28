@@ -2,8 +2,7 @@ streamlit
 pandas
 numpy
 matplotlib
-plotnine
-scipy
-arch
 ccxt
 numba
+scipy
+plotnine
