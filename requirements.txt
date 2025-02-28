@@ -6,3 +6,4 @@ plotnine
 scipy
 arch
 ccxt
+numba
