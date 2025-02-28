@@ -30,14 +30,20 @@ lookback_options = {
     "2 Weeks": 20160,
     "1 Month": 43200
 }
-global_lookback_label = st.sidebar.selectbox("Select Global Lookback Period",
-                                               list(lookback_options.keys()),
-                                               key="global_lookback_label")
+global_lookback_label = st.sidebar.selectbox(
+    "Select Global Lookback Period",
+    list(lookback_options.keys()),
+    key="global_lookback_label"
+)
 global_lookback_minutes = lookback_options[global_lookback_label]
-timeframe = st.sidebar.selectbox("Select Timeframe", ["1m", "5m", "15m", "1h"],
-                                 key="timeframe_widget")
-bvc_model = st.sidebar.selectbox("Select BVC Model", ["Hawkes", "ACD", "ACI"],
-                                 key="bvc_model")
+timeframe = st.sidebar.selectbox(
+    "Select Timeframe", ["1m", "5m", "15m", "1h"],
+    key="timeframe_widget"
+)
+bvc_model = st.sidebar.selectbox(
+    "Select BVC Model", ["Hawkes", "ACD", "ACI"],
+    key="bvc_model"
+)
 
 @njit(cache=True)
 def ema(arr_in: np.ndarray, window: int, alpha: float = 0) -> np.ndarray:
@@ -413,3 +419,4 @@ ax_bvc.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
 plt.setp(ax_bvc.get_xticklabels(), rotation=30, ha='right', fontsize=7)
 plt.setp(ax_bvc.get_yticklabels(), fontsize=7)
 st.pyplot(fig_bvc)
+
