@@ -159,16 +159,6 @@ class HawkesBVC:
         else:
             return 0.0
 
-    def plot(self):
-        return (
-            ggplot(self.metrics, aes(x='stamp', y='bvc'))
-            + geom_line(color='blue', size=0.5)
-            + labs(title="B/S Imbalance", x="Time", y="BVC")
-            + theme_minimal()
-            + theme(figure_size=(11, 5))
-        )
-
-# ACDBVC: Custom simple ACD-like model
 class ACDBVC:
     def __init__(self, kappa: float):
         self._kappa = kappa
@@ -205,7 +195,6 @@ class ACDBVC:
             st.error(f"Error in ACDBVC model: {e}")
             return pd.DataFrame()
 
-# ACIBVC: Custom simple ACI-like model
 class ACIBVC:
     def __init__(self, kappa: float):
         self._kappa = kappa
@@ -298,7 +287,6 @@ prices_bsi.set_index('stamp', inplace=True)
 
 prices_bsi['ScaledPrice'] = np.log(prices_bsi['close'] / prices_bsi['close'].iloc[0]) * 1e4
 prices_bsi['ScaledPrice_EMA'] = ema(prices_bsi['ScaledPrice'].values, window=10)
-
 prices_bsi['cum_vol'] = prices_bsi['volume'].cumsum()
 prices_bsi['cum_pv'] = (prices_bsi['close'] * prices_bsi['volume']).cumsum()
 prices_bsi['vwap'] = prices_bsi['cum_pv'] / prices_bsi['cum_vol']
@@ -376,10 +364,9 @@ global_min = df_skew['ScaledPrice'].min()
 global_max = df_skew['ScaledPrice'].max()
 
 # =============================================================================
-# PLOTTING SECTION
+# PLOTTING SECTION - PRICE CHART COLORED BASED ON NORMALIZED BVC
 # =============================================================================
 fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-# Use the same BVC-based coloring for all models
 norm_bvc = plt.Normalize(df_skew['bvc'].min(), df_skew['bvc'].max())
 for i in range(len(df_skew['stamp']) - 1):
     xvals = df_skew['stamp'].iloc[i:i+2]
@@ -389,7 +376,7 @@ for i in range(len(df_skew['stamp']) - 1):
     color = cmap_bvc(norm_bvc(bvc_val))
     ax.plot(xvals, yvals, color=color, linewidth=1)
 ax.plot(df_skew['stamp'], df_skew['ScaledPrice_EMA'], color='gray', linewidth=0.7, label=f"EMA({ema_window})")
-# Plot VWAP for reference with conditional coloring
+# Plot VWAP for reference
 for i in range(len(df_skew['stamp']) - 1):
     xvals = df_skew['stamp'].iloc[i:i+2]
     if df_skew['ScaledPrice'].iloc[i] >= df_skew['vwap_transformed'].iloc[i]:
@@ -400,7 +387,7 @@ for i in range(len(df_skew['stamp']) - 1):
             color=vwap_color, linewidth=0.7, label="VWAP" if i == 0 else None)
 ax.set_xlabel("Time", fontsize=8)
 ax.set_ylabel("ScaledPrice", fontsize=8)
-ax.set_title("Price with EMA & Conditional VWAP", fontsize=10)
+ax.set_title("Price with EMA & VWAP (BVC-based Coloring)", fontsize=10)
 ax.legend(fontsize=7)
 ax.xaxis.set_major_locator(mdates.AutoDateLocator())
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
