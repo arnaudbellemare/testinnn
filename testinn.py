@@ -30,11 +30,15 @@ lookback_options = {
     "2 Weeks": 20160,
     "1 Month": 43200
 }
-global_lookback_label = st.sidebar.selectbox("Select Global Lookback Period", list(lookback_options.keys()), key="global_lookback_label")
+global_lookback_label = st.sidebar.selectbox("Select Global Lookback Period",
+                                               list(lookback_options.keys()),
+                                               key="global_lookback_label")
 global_lookback_minutes = lookback_options[global_lookback_label]
-timeframe = st.sidebar.selectbox("Select Timeframe", ["1m", "5m", "15m", "1h"], key="timeframe_widget")
-# New analysis type selection
-analysis_type = st.sidebar.selectbox("Select Analysis Type", ["Hawkes BVC", "ADC", "ACI"], key="analysis_type")
+timeframe = st.sidebar.selectbox("Select Timeframe", ["1m", "5m", "15m", "1h"],
+                                 key="timeframe_widget")
+analysis_type = st.sidebar.selectbox("Select Analysis Type",
+                                     ["Hawkes BVC", "ADC", "ACI"],
+                                     key="analysis_type")
 
 @njit(cache=True)
 def ema(arr_in: np.ndarray, window: int, alpha: float = 0) -> np.ndarray:
@@ -43,90 +47,9 @@ def ema(arr_in: np.ndarray, window: int, alpha: float = 0) -> np.ndarray:
     ewma = np.empty(n, dtype=np.float64)
     ewma[0] = arr_in[0]
     for i in range(1, n):
-        ewma[i] = (arr_in[i] * alpha) + (ewma[i - 1] * (1 - alpha))
+        ewma[i] = (arr_in[i] * alpha) + (ewma[i-1] * (1 - alpha))
     return ewma
 
-@njit(cache=True)
-def bbw(klines: np.ndarray, length: int, multiplier: float) -> float:
-    closes = klines[:, 4]
-    dev = multiplier * np.std(closes[-length:])
-    return 2 * dev
-
-def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
-    exchange = ccxt.kraken()
-    now_ms = exchange.milliseconds()
-    cutoff_ts = now_ms - lookback_minutes * 60 * 1000
-    all_ohlcv = []
-    since = cutoff_ts
-    max_limit = 1440
-    while True:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=max_limit)
-        if not ohlcv:
-            break
-        all_ohlcv += ohlcv
-        last_timestamp = ohlcv[-1][0]
-        if last_timestamp <= cutoff_ts or len(ohlcv) < max_limit:
-            break
-        since = last_timestamp + 1
-    df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["stamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    now = pd.to_datetime(now_ms, unit="ms")
-    cutoff = now - pd.Timedelta(minutes=lookback_minutes)
-    return df[df["stamp"] >= cutoff]
-
-@st.cache_data
-def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
-    exchange = ccxt.kraken()
-    now_ms = exchange.milliseconds()
-    cutoff_ts = now_ms - lookback_minutes * 60 * 1000
-    since = cutoff_ts
-    all_trades = []
-    while True:
-        trades = exchange.fetch_trades(symbol, since=since, limit=limit)
-        if not trades:
-            break
-        all_trades += trades
-        since = trades[-1]['timestamp'] + 1
-        if trades[-1]['timestamp'] >= now_ms or len(trades) < limit:
-            break
-    all_trades = [trade for trade in all_trades if trade['timestamp'] >= cutoff_ts]
-    if not all_trades:
-        raise ValueError(f"No trades returned from Kraken in the last {lookback_minutes} minutes.")
-    df_tr = pd.DataFrame(all_trades)
-    # Keep time as seconds (float); convert later
-    df_tr['time'] = df_tr['timestamp'] / 1000.0
-    df_tr['vol'] = df_tr['amount']
-    df_tr = df_tr[['time', 'price', 'vol']].copy()
-    df_tr.sort_values('time', inplace=True)
-    df_tr.reset_index(drop=True, inplace=True)
-    return df_tr
-
-def fraction_buy(prices):
-    dp = np.diff(np.log(prices))
-    if len(dp) < 2:
-        return np.zeros_like(dp)
-    mean_ = np.nanmean(dp)
-    std_ = np.nanstd(dp)
-    if std_ == 0:
-        return np.zeros_like(dp)
-    z = (dp - mean_) / std_
-    return norm.cdf(z)
-
-def vol_bin(volumes, w):
-    group = np.zeros_like(volumes, dtype=int)
-    cur_g = 0
-    csum = 0
-    for i in range(len(volumes)):
-        csum += volumes[i]
-        group[i] = cur_g
-        if csum >= w:
-            cur_g += 1
-            csum = 0
-    return group
-
-# -----------------------------------------------------------------------------
-# NEW FUNCTIONS FOR ADC and ACI Analysis
-# -----------------------------------------------------------------------------
 @njit(cache=True)
 def directional_change(prices: np.ndarray, threshold: float = 0.005) -> np.ndarray:
     n = len(prices)
@@ -178,6 +101,77 @@ def accumulated_candle_index(klines: np.ndarray, lookback: int = 20) -> np.ndarr
             aci[i] = candle_score
     return aci
 
+def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
+    exchange = ccxt.kraken()
+    now_ms = exchange.milliseconds()
+    cutoff_ts = now_ms - lookback_minutes * 60 * 1000
+    all_ohlcv = []
+    since = cutoff_ts
+    max_limit = 1440
+    while True:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=max_limit)
+        if not ohlcv:
+            break
+        all_ohlcv += ohlcv
+        last_timestamp = ohlcv[-1][0]
+        if last_timestamp <= cutoff_ts or len(ohlcv) < max_limit:
+            break
+        since = last_timestamp + 1
+    df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["stamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    now = pd.to_datetime(now_ms, unit="ms")
+    cutoff = now - pd.Timedelta(minutes=lookback_minutes)
+    return df[df["stamp"] >= cutoff]
+
+@st.cache_data
+def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
+    exchange = ccxt.kraken()
+    now_ms = exchange.milliseconds()
+    cutoff_ts = now_ms - lookback_minutes * 60 * 1000
+    since = cutoff_ts
+    all_trades = []
+    while True:
+        trades = exchange.fetch_trades(symbol, since=since, limit=limit)
+        if not trades:
+            break
+        all_trades += trades
+        since = trades[-1]['timestamp'] + 1
+        if trades[-1]['timestamp'] >= now_ms or len(trades) < limit:
+            break
+    all_trades = [trade for trade in all_trades if trade['timestamp'] >= cutoff_ts]
+    if not all_trades:
+        raise ValueError(f"No trades returned from Kraken in the last {lookback_minutes} minutes.")
+    df_tr = pd.DataFrame(all_trades)
+    df_tr['time'] = df_tr['timestamp'] / 1000.0
+    df_tr['vol'] = df_tr['amount']
+    df_tr = df_tr[['time', 'price', 'vol']].copy()
+    df_tr.sort_values('time', inplace=True)
+    df_tr.reset_index(drop=True, inplace=True)
+    return df_tr
+
+def fraction_buy(prices):
+    dp = np.diff(np.log(prices))
+    if len(dp) < 2:
+        return np.zeros_like(dp)
+    mean_ = np.nanmean(dp)
+    std_ = np.nanstd(dp)
+    if std_ == 0:
+        return np.zeros_like(dp)
+    z = (dp - mean_) / std_
+    return norm.cdf(z)
+
+def vol_bin(volumes, w):
+    group = np.zeros_like(volumes, dtype=int)
+    cur_g = 0
+    csum = 0
+    for i in range(len(volumes)):
+        csum += volumes[i]
+        group[i] = cur_g
+        if csum >= w:
+            cur_g += 1
+            csum = 0
+    return group
+
 # -----------------------------------------------------------------------------
 # NEW CLASSES FOR ADC and ACI Analysis
 # -----------------------------------------------------------------------------
@@ -228,10 +222,10 @@ class AccumulatedCandleAnalysis:
         self.metrics = pd.DataFrame({'stamp': times, 'bvc': aci_values})
         return self.metrics
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # MAIN DASHBOARD LOGIC
-# =============================================================================
-st.header("Section 1: Momentum, Skewness & BVC Analysis")
+# -----------------------------------------------------------------------------
+st.header("Section 1: Momentum, Skewness & Indicator Analysis")
 symbol_bsi1 = st.sidebar.text_input("Enter Ticker Symbol (Sec 1)", value="BTC/USD", key="symbol_bsi1")
 st.write(f"Fetching data for: **{symbol_bsi1}** with a global lookback of **{global_lookback_minutes}** minutes and timeframe **{timeframe}**.")
 
@@ -259,9 +253,9 @@ if 'buyvolume' not in prices_bsi.columns or 'sellvolume' not in prices_bsi.colum
     prices_bsi['buyvolume'] = prices_bsi['volume'] * 0.5
     prices_bsi['sellvolume'] = prices_bsi['volume'] - prices_bsi['buyvolume']
 
-# =============================================================================
-# BVC MODEL EVALUATION & MERGE
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Indicator Evaluation & Merge
+# -----------------------------------------------------------------------------
 if analysis_type == "Hawkes BVC":
     st.write("### Hawkes BVC Analysis")
     model = HawkesBVC(window=20, kappa=0.1)
@@ -279,19 +273,19 @@ else:  # ACI
     bvc_metrics = aci_analysis.eval(prices_bsi.reset_index(), scale=1e4)
     indicator_title = "ACI"
 
+# Merge indicator with price data
 df_merged = prices_bsi.reset_index().merge(bvc_metrics, on='stamp', how='left')
 df_merged.sort_values('stamp', inplace=True)
 df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
 
-# Debug: Display BVC value summary
 st.write("BVC Summary:", df_merged['bvc'].describe())
 
-# Fixed normalization range for gradient coloring: -1 to 1
+# Use a fixed normalization range from -1 to 1 for gradient coloring
 norm_bvc = plt.Normalize(-1, 1)
 
-# =============================================================================
-# PLOTTING SECTION - Price Chart Colored by Normalized BVC
-# =============================================================================
+# -----------------------------------------------------------------------------
+# PLOTTING: Price Chart Colored by Indicator Gradient
+# -----------------------------------------------------------------------------
 fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
 for i in range(len(df_merged) - 1):
     xvals = df_merged['stamp'].iloc[i:i+2]
@@ -299,12 +293,10 @@ for i in range(len(df_merged) - 1):
     bvc_val = df_merged['bvc'].iloc[i]
     color = plt.cm.bwr(norm_bvc(bvc_val))
     ax.plot(xvals, yvals, color=color, linewidth=1.2)
-ax.plot(df_merged['stamp'], df_merged['ScaledPrice_EMA'], color='black',
-        linewidth=1, label="EMA(10)")
-ax.plot(df_merged['stamp'], df_merged['vwap_transformed'], color='gray',
-        linewidth=1, label="VWAP")
+ax.plot(df_merged['stamp'], df_merged['ScaledPrice_EMA'], color='black', linewidth=1, label="EMA(10)")
+ax.plot(df_merged['stamp'], df_merged['vwap_transformed'], color='gray', linewidth=1, label="VWAP")
 ax.set_xlabel("Time", fontsize=8)
-ax.set_ylabel("ScaledPrice", fontsize=8)
+ax.set_ylabel("Scaled Price", fontsize=8)
 ax.set_title(f"Price with EMA & VWAP (Colored by {indicator_title})", fontsize=10)
 ax.legend(fontsize=7)
 ax.xaxis.set_major_locator(mdates.AutoDateLocator())
@@ -315,12 +307,11 @@ ax.set_ylim(df_merged['ScaledPrice'].min() - 50, df_merged['ScaledPrice'].max() 
 plt.tight_layout()
 st.pyplot(fig)
 
-# =============================================================================
-# BVC PLOT
-# =============================================================================
+# -----------------------------------------------------------------------------
+# PLOTTING: Indicator (BVC/ADC/ACI) Over Time
+# -----------------------------------------------------------------------------
 fig_bvc, ax_bvc = plt.subplots(figsize=(10, 3), dpi=120)
-ax_bvc.plot(bvc_metrics['stamp'], bvc_metrics['bvc'], color="blue", linewidth=1,
-            label=f"{indicator_title}")
+ax_bvc.plot(bvc_metrics['stamp'], bvc_metrics['bvc'], color="blue", linewidth=1, label=f"{indicator_title}")
 ax_bvc.set_xlabel("Time", fontsize=8)
 ax_bvc.set_ylabel(indicator_title, fontsize=8)
 ax_bvc.legend(fontsize=7)
