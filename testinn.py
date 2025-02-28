@@ -172,9 +172,116 @@ def vol_bin(volumes, w):
             csum = 0
     return group
 
-# -----------------------------------------------------------------------------
-# NEW CLASSES FOR ADC and ACI Analysis
-# -----------------------------------------------------------------------------
+# =============================================================================
+# CLASSES FOR ANALYSIS
+# =============================================================================
+class HawkesBVC:
+    def __init__(self, window: int, kappa: float, dof=0.25):
+        self._window = window
+        self._kappa = kappa
+        self._dof = dof
+        self.metrics = None
+
+    def eval(self, df: pd.DataFrame, scale=1e4):
+        times = df['stamp']
+        prices = df['close']
+        cumr = np.log(prices / prices.iloc[0])
+        r = cumr.diff().fillna(0.0)
+        volume = df['volume']
+        sigma = r.rolling(self._window).std().fillna(0.0)
+        alpha_exp = np.exp(-self._kappa)
+        labels = np.array([self._label(r.iloc[i], sigma.iloc[i]) for i in range(len(r))])
+        bvc = np.zeros(len(volume), dtype=np.float64)
+        current_bvc = 0.0
+        for i in range(len(volume)):
+            current_bvc = current_bvc * alpha_exp + volume.values[i] * labels[i]
+            bvc[i] = current_bvc
+        if np.max(np.abs(bvc)) != 0:
+            bvc = bvc / np.max(np.abs(bvc)) * scale
+        self.metrics = pd.DataFrame({'stamp': times, 'bvc': bvc})
+        return self.metrics
+
+    def _label(self, r: float, sigma: float):
+        if sigma > 0.0:
+            return 2 * t.cdf(r / sigma, df=self._dof) - 1.0
+        else:
+            return 0.0
+
+class ACDBVC:
+    def __init__(self, kappa: float):
+        self._kappa = kappa
+        self.metrics = None
+
+    def eval(self, df_tr: pd.DataFrame, scale=1e5):
+        try:
+            df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
+            df_tr['duration'] = df_tr['time'].diff().shift(-1)
+            df_tr = df_tr.dropna(subset=['duration'])
+            df_tr = df_tr[df_tr['duration'] > 0]
+            if len(df_tr) < 10:
+                raise ValueError("Insufficient trade data for custom ACD model.")
+            mean_duration = df_tr['duration'].mean()
+            std_duration = df_tr['duration'].std() or 1e-10
+            df_tr['standardized_residual'] = (df_tr['duration'] - mean_duration) / std_duration
+            df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
+            df_tr['label'] = -df_tr['standardized_residual'] * df_tr['price_change']
+            df_tr['weighted_volume'] = df_tr['vol'] * df_tr['label']
+            alpha_exp = np.exp(-self._kappa)
+            bvc_list = []
+            current_bvc = 0.0
+            for wv in df_tr['weighted_volume'].values:
+                current_bvc = current_bvc * alpha_exp + wv
+                bvc_list.append(current_bvc)
+            bvc = np.array(bvc_list)
+            if np.max(np.abs(bvc)) != 0:
+                bvc = bvc / np.max(np.abs(bvc)) * scale
+            df_tr["stamp"] = pd.to_datetime(df_tr["time"], unit='s')
+            self.metrics = pd.DataFrame({'stamp': df_tr["stamp"], 'bvc': bvc})
+            return self.metrics
+        except Exception as e:
+            st.error(f"Error in ACDBVC model: {e}")
+            return pd.DataFrame()
+
+class ACIBVC:
+    def __init__(self, kappa: float):
+        self._kappa = kappa
+        self.metrics = None
+
+    def eval(self, df_tr: pd.DataFrame, scale=1e5):
+        try:
+            df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
+            times = pd.to_datetime(df_tr['time'], unit='s')
+            times_numeric = times.astype(np.int64) // 10**9
+            intensities = self.estimate_intensity(times_numeric, self._kappa)
+            df_tr = df_tr.iloc[:len(intensities)]
+            df_tr['intensity'] = intensities
+            df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
+            df_tr['label'] = df_tr['intensity'] * df_tr['price_change']
+            df_tr['weighted_volume'] = df_tr['vol'] * df_tr['label']
+            alpha_exp = np.exp(-self._kappa)
+            bvc_list = []
+            current_bvc = 0.0
+            for wv in df_tr['weighted_volume'].values:
+                current_bvc = current_bvc * alpha_exp + wv
+                bvc_list.append(current_bvc)
+            bvc = np.array(bvc_list)
+            if np.max(np.abs(bvc)) != 0:
+                bvc = bvc / np.max(np.abs(bvc)) * scale
+            df_tr["stamp"] = pd.to_datetime(df_tr["time"], unit='s')
+            self.metrics = pd.DataFrame({'stamp': df_tr["stamp"], 'bvc': bvc})
+            return self.metrics
+        except Exception as e:
+            st.error(f"Error in ACIBVC model: {e}")
+            return pd.DataFrame()
+
+    def estimate_intensity(self, times: np.ndarray, beta: float) -> np.ndarray:
+        intensities = [0.0]
+        for i in range(1, len(times)):
+            delta_t = times[i] - times[i-1]
+            intensities.append(intensities[-1] * np.exp(-beta * delta_t) + 1)
+        return np.array(intensities)
+
+# New classes for ADC and ACI analyses
 class DirectionalChangeAnalysis:
     def __init__(self, window: int = 20, threshold: float = 0.005, kappa: float = 0.1):
         self._window = window
@@ -222,9 +329,9 @@ class AccumulatedCandleAnalysis:
         self.metrics = pd.DataFrame({'stamp': times, 'bvc': aci_values})
         return self.metrics
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # MAIN DASHBOARD LOGIC
-# -----------------------------------------------------------------------------
+# =============================================================================
 st.header("Section 1: Momentum, Skewness & Indicator Analysis")
 symbol_bsi1 = st.sidebar.text_input("Enter Ticker Symbol (Sec 1)", value="BTC/USD", key="symbol_bsi1")
 st.write(f"Fetching data for: **{symbol_bsi1}** with a global lookback of **{global_lookback_minutes}** minutes and timeframe **{timeframe}**.")
@@ -273,7 +380,6 @@ else:  # ACI
     bvc_metrics = aci_analysis.eval(prices_bsi.reset_index(), scale=1e4)
     indicator_title = "ACI"
 
-# Merge indicator with price data
 df_merged = prices_bsi.reset_index().merge(bvc_metrics, on='stamp', how='left')
 df_merged.sort_values('stamp', inplace=True)
 df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
@@ -308,7 +414,7 @@ plt.tight_layout()
 st.pyplot(fig)
 
 # -----------------------------------------------------------------------------
-# PLOTTING: Indicator (BVC/ADC/ACI) Over Time
+# PLOTTING: Indicator Over Time
 # -----------------------------------------------------------------------------
 fig_bvc, ax_bvc = plt.subplots(figsize=(10, 3), dpi=120)
 ax_bvc.plot(bvc_metrics['stamp'], bvc_metrics['bvc'], color="blue", linewidth=1, label=f"{indicator_title}")
