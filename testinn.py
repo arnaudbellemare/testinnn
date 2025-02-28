@@ -110,9 +110,7 @@ class ACDBVC:
             
             # Custom simple ACD-like model: standardize durations
             mean_duration = df_tr['duration'].mean()
-            std_duration = df_tr['duration'].std()
-            if std_duration == 0:
-                std_duration = 1e-10
+            std_duration = df_tr['duration'].std() or 1e-10
             df_tr['standardized_residual'] = (df_tr['duration'] - mean_duration) / std_duration
 
             df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
@@ -194,21 +192,27 @@ def main():
     if prices_bsi is None or prices_bsi.empty:
         st.stop()
 
-    # Compute additional metrics
+    # Compute additional metrics with EMA10 (alpha = 2/11 ≈ 0.1818)
+    ema10 = ema(prices_bsi['close'], alpha=2/11)
+    prices_bsi['EMA10'] = ema10
     scaled_price = ScaledPrice(prices_bsi)
     prices_bsi['ScaledPrice'] = scaled_price.scaled
-    prices_bsi['EMA'] = ema(prices_bsi['close'], alpha=0.05)
     prices_bsi['VWAP'] = (prices_bsi['close'] * prices_bsi['volume']).cumsum() / prices_bsi['volume'].cumsum()
+
+    # Determine dynamic colors for the price line based on the relationship of price and EMA10
+    latest_price = prices_bsi['close'].iloc[-1]
+    latest_ema = prices_bsi['EMA10'].iloc[-1]
+    price_line_color = "green" if latest_price >= latest_ema else "red"
 
     # Price Plot
     fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-    ax.plot(prices_bsi['stamp'], prices_bsi['close'], linewidth=0.8, label="Price", color="black")
-    ax.plot(prices_bsi['stamp'], prices_bsi['EMA'], linewidth=0.8, label="EMA", color="orange")
-    ax.plot(prices_bsi['stamp'], prices_bsi['VWAP'], linewidth=0.8, label="VWAP", color="purple")
+    ax.plot(prices_bsi['stamp'], prices_bsi['close'], linewidth=1.2, label="Price", color=price_line_color)
+    ax.plot(prices_bsi['stamp'], prices_bsi['EMA10'], linewidth=1.2, label="EMA10", color="magenta")
+    ax.plot(prices_bsi['stamp'], prices_bsi['VWAP'], linewidth=1.2, label="VWAP", color="purple")
     ax.set_xlabel("Time", fontsize=8)
     ax.set_ylabel("Price", fontsize=8)
-    ax.legend(fontsize=7)
-    ax.set_title(f"Price with EMA and VWAP for {symbol_bsi1}", fontsize=10)
+    ax.legend(fontsize=8)
+    ax.set_title(f"Price with EMA10 and VWAP for {symbol_bsi1}", fontsize=10)
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
     plt.setp(ax.get_xticklabels(), rotation=30, ha='right', fontsize=7)
@@ -220,7 +224,6 @@ def main():
         hawkes_bvc = HawkesBVC(window=20, kappa=0.1)
         bvc_metrics = hawkes_bvc.eval(prices_bsi)
         bvc_column = 'bvc'
-        label = "BVC (Hawkes)"
     else:
         with st.spinner("Fetching trade data..."):
             df_tr = fetch_trades_kraken(symbol=symbol_bsi1, lookback_minutes=global_lookback_minutes)
@@ -231,23 +234,29 @@ def main():
             bvc = ACDBVC(kappa=0.1)
             bvc_metrics = bvc.eval(df_tr)
             bvc_column = 'bvc_acd'
-            label = "BVC (ACD)"
         elif bvc_method == "ACI":
             bvc = ACIBVC(kappa=0.1)
             bvc_metrics = bvc.eval(df_tr)
             bvc_column = 'bvc_aci'
-            label = "BVC (ACI)"
+    
+    # Determine model line color based on the last two BVC values.
+    if not bvc_metrics.empty and len(bvc_metrics) >= 2:
+        last_val = bvc_metrics[bvc_column].iloc[-1]
+        prev_val = bvc_metrics[bvc_column].iloc[-2]
+        model_line_color = "blue" if last_val >= prev_val else "orange"
+    else:
+        model_line_color = "blue"
 
     if bvc_metrics.empty:
-        st.warning(f"No {label} metrics available to plot.")
+        st.warning("No BVC metrics available to plot.")
     else:
         # BVC Plot
         fig_bvc, ax_bvc = plt.subplots(figsize=(10, 3), dpi=120)
-        ax_bvc.plot(bvc_metrics['stamp'], bvc_metrics[bvc_column], color="blue", linewidth=0.8, label=label)
+        ax_bvc.plot(bvc_metrics['stamp'], bvc_metrics[bvc_column], color=model_line_color, linewidth=1.2, label=f"BVC ({bvc_method})")
         ax_bvc.set_xlabel("Time", fontsize=8)
         ax_bvc.set_ylabel("BVC", fontsize=8)
-        ax_bvc.legend(fontsize=7)
-        ax_bvc.set_title(f"{label}", fontsize=10)
+        ax_bvc.legend(fontsize=8)
+        ax_bvc.set_title(f"BVC ({bvc_method})", fontsize=10)
         ax_bvc.xaxis.set_major_locator(mdates.AutoDateLocator())
         ax_bvc.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
         plt.setp(ax_bvc.get_xticklabels(), rotation=30, ha='right', fontsize=7)
@@ -256,4 +265,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
