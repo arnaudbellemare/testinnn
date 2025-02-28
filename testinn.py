@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import ccxt
 from numba import njit
-from scipy.stats import norm, t
+from scipy.stats import norm, t  # use t from scipy.stats
 from plotnine import ggplot, aes, geom_line, labs, theme_minimal, theme
 
 # =============================================================================
@@ -71,7 +71,6 @@ def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
     cutoff = now - pd.Timedelta(minutes=lookback_minutes)
     return df[df["stamp"] >= cutoff]
 
-@st.cache_data
 def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
     exchange = ccxt.kraken()
     now_ms = exchange.milliseconds()
@@ -90,8 +89,7 @@ def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
     if not all_trades:
         raise ValueError(f"No trades returned from Kraken in the last {lookback_minutes} minutes.")
     df_tr = pd.DataFrame(all_trades)
-    # "time" remains in seconds (float); we'll convert later
-    df_tr['time'] = df_tr['timestamp'] / 1000.0
+    df_tr['time'] = df_tr['timestamp'] / 1000.0  # keep time as float seconds
     df_tr['vol'] = df_tr['amount']
     df_tr = df_tr[['time', 'price', 'vol']].copy()
     df_tr.sort_values('time', inplace=True)
@@ -151,7 +149,7 @@ class HawkesBVC:
         return self.metrics
 
     def _label(self, r: float, sigma: float):
-        if sigma > 0.0:
+        if sigma > 0:
             return 2 * t.cdf(r / sigma, df=self._dof) - 1.0
         else:
             return 0.0
@@ -164,13 +162,12 @@ class ACDBVC:
     def eval(self, df_tr: pd.DataFrame, scale=1e4) -> pd.DataFrame:
         try:
             df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
-            # "time" is in seconds (float); duration in seconds:
+            # "time" is in seconds (float)
             df_tr['duration'] = df_tr['time'].diff().shift(-1)
             df_tr = df_tr.dropna(subset=['duration'])
             df_tr = df_tr[df_tr['duration'] > 0]
             if len(df_tr) < 10:
                 raise ValueError("Insufficient trade data for custom ACD model.")
-            
             mean_duration = df_tr['duration'].mean()
             std_duration = df_tr['duration'].std() or 1e-10
             df_tr['standardized_residual'] = (df_tr['duration'] - mean_duration) / std_duration
@@ -186,7 +183,7 @@ class ACDBVC:
             bvc = np.array(bvc_list)
             if np.max(np.abs(bvc)) != 0:
                 bvc = bvc / np.max(np.abs(bvc)) * scale
-            # Create a stamp column from "time" (epoch seconds)
+            # Create a stamp column from the time (seconds)
             df_tr["stamp"] = pd.to_datetime(df_tr["time"], unit='s')
             self.metrics = pd.DataFrame({'stamp': df_tr["stamp"], 'bvc': bvc})
             return self.metrics
@@ -237,7 +234,6 @@ class ACIBVC:
 # MAIN DASHBOARD LOGIC
 # =============================================================================
 st.header("Section 1: Momentum, Skewness & BVC Analysis")
-
 symbol_bsi1 = st.sidebar.text_input("Enter Ticker Symbol (Sec 1)", 
                                       value="BTC/USD", key="symbol_bsi1")
 st.write(f"Fetching data for: **{symbol_bsi1}** with a global lookback of **{global_lookback_minutes}** minutes and timeframe **{timeframe}**.")
@@ -252,10 +248,8 @@ except Exception as e:
 prices_bsi.dropna(subset=['close', 'volume'], inplace=True)
 prices_bsi['stamp'] = pd.to_datetime(prices_bsi['stamp'])
 prices_bsi.set_index('stamp', inplace=True)
-
 prices_bsi['ScaledPrice'] = np.log(prices_bsi['close'] / prices_bsi['close'].iloc[0]) * 1e4
 prices_bsi['ScaledPrice_EMA'] = ema(prices_bsi['ScaledPrice'].values, window=10)
-
 prices_bsi['cum_vol'] = prices_bsi['volume'].cumsum()
 prices_bsi['cum_pv'] = (prices_bsi['close'] * prices_bsi['volume']).cumsum()
 prices_bsi['vwap'] = prices_bsi['cum_pv'] / prices_bsi['cum_vol']
@@ -301,8 +295,7 @@ df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
 
 global_min = df_merged['ScaledPrice'].min()
 global_max = df_merged['ScaledPrice'].max()
-
-# Fixed normalization range from -1 to 1 for the colormap
+# Fixed normalization range: -1 to 1
 norm_bvc = plt.Normalize(-1, 1)
 
 # =============================================================================
