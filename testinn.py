@@ -6,6 +6,7 @@ import matplotlib.dates as mdates
 import ccxt
 from numba import njit
 from scipy.stats import norm, t
+from plotnine import ggplot, aes, geom_line, labs, theme_minimal, theme
 
 # =============================================================================
 # SESSION STATE INITIALIZATION
@@ -46,6 +47,7 @@ bvc_model = st.sidebar.selectbox(
 
 @njit(cache=True)
 def ema(arr_in: np.ndarray, window: int, alpha: float = 0) -> np.ndarray:
+    # If alpha not provided, use default formula: 3/(window+1)
     alpha = 3 / float(window + 1) if alpha == 0 else alpha
     n = arr_in.size
     ewma = np.empty(n, dtype=np.float64)
@@ -60,143 +62,313 @@ def fetch_data(symbol, timeframe="1m", lookback_minutes=1440):
     cutoff_ts = now_ms - lookback_minutes * 60 * 1000
     all_ohlcv = []
     since = cutoff_ts
+    max_limit = 1440
     while True:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=max_limit)
         if not ohlcv:
             break
         all_ohlcv += ohlcv
-        if ohlcv[-1][0] <= cutoff_ts:
+        last_timestamp = ohlcv[-1][0]
+        if last_timestamp <= cutoff_ts or len(ohlcv) < max_limit:
             break
-        since = ohlcv[-1][0] + 1
-    df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        since = last_timestamp + 1
+    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["stamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    return df[df["stamp"] >= pd.to_datetime(cutoff_ts, unit="ms")]
+    now = pd.to_datetime(now_ms, unit="ms")
+    cutoff = now - pd.Timedelta(minutes=lookback_minutes)
+    df = df[df["stamp"] >= cutoff]
+    return df
 
 @st.cache_data
-def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440):
+def fetch_trades_kraken(symbol="BTC/USD", lookback_minutes=1440, limit=43200):
     exchange = ccxt.kraken()
     now_ms = exchange.milliseconds()
     cutoff_ts = now_ms - lookback_minutes * 60 * 1000
-    all_trades = []
     since = cutoff_ts
+    all_trades = []
     while True:
-        trades = exchange.fetch_trades(symbol, since=since)
+        trades = exchange.fetch_trades(symbol, since=since, limit=limit)
         if not trades:
             break
         all_trades += trades
         since = trades[-1]['timestamp'] + 1
-        if trades[-1]['timestamp'] >= now_ms:
+        if trades[-1]['timestamp'] >= now_ms or len(trades) < limit:
             break
-    df_tr = pd.DataFrame([t for t in all_trades if t['timestamp'] >= cutoff_ts])
+    all_trades = [trade for trade in all_trades if trade['timestamp'] >= cutoff_ts]
+    if not all_trades:
+        raise ValueError(f"No trades returned from Kraken in the last {lookback_minutes} minutes.")
+    df_tr = pd.DataFrame(all_trades)
     df_tr['time'] = df_tr['timestamp'] / 1000.0
-    return df_tr[['time', 'price', 'amount']].rename(columns={'amount': 'vol'})
+    df_tr['vol'] = df_tr['amount']
+    df_tr = df_tr[['time', 'price', 'vol']].copy()
+    df_tr.sort_values('time', inplace=True)
+    df_tr.reset_index(drop=True, inplace=True)
+    return df_tr
+
+def fraction_buy(prices):
+    dp = np.diff(np.log(prices))
+    if len(dp) < 2:
+        return np.zeros_like(dp)
+    mean_ = np.nanmean(dp)
+    std_ = np.nanstd(dp)
+    if std_ == 0:
+        return np.zeros_like(dp)
+    z = (dp - mean_) / std_
+    return norm.cdf(z)
+
+def vol_bin(volumes, w):
+    group = np.zeros_like(volumes, dtype=int)
+    cur_g = 0
+    csum = 0
+    for i in range(len(volumes)):
+        csum += volumes[i]
+        group[i] = cur_g
+        if csum >= w:
+            cur_g += 1
+            csum = 0
+    return group
 
 # =============================================================================
-# BVC MODELS
+# CLASSES FOR ANALYSIS
 # =============================================================================
 class HawkesBVC:
-    def __init__(self, window=20, kappa=0.1):
-        self.window = window
-        self.kappa = kappa
+    def __init__(self, window: int, kappa: float, dof=0.25):
+        self._window = window
+        self._kappa = kappa
+        self._dof = dof
+        self.metrics = None
 
-    def eval(self, df):
-        prices = df['close'].values
-        r = np.log(prices[1:]/prices[:-1])
-        sigma = pd.Series(r).rolling(self.window).std().ffill().values
-        labels = np.array([2 * t.cdf(ri/(s if s>0 else 1e-10), df=0.25).clip(0,1) - 1 
-                   for ri, s in zip(r, sigma)])
-        bvc = np.zeros(len(df))
-        current = 0
-        alpha = np.exp(-self.kappa)
-        for i in range(1, len(df)):
-            current = current * alpha + df['volume'].iloc[i] * labels[i-1]
-            bvc[i] = current
-        return pd.DataFrame({'stamp': df['stamp'], 'bvc': bvc})
+    def eval(self, df: pd.DataFrame, scale=1e4):
+        times = df['stamp']
+        prices = df['close']
+        cumr = np.log(prices / prices.iloc[0])
+        r = cumr.diff().fillna(0.0)
+        volume = df['volume']
+        sigma = r.rolling(self._window).std().fillna(0.0)
+        alpha_exp = np.exp(-self._kappa)
+        labels = np.array([self._label(r.iloc[i], sigma.iloc[i]) for i in range(len(r))])
+        bvc = np.zeros(len(volume), dtype=float)
+        current_bvc = 0.0
+        for i in range(len(volume)):
+            current_bvc = current_bvc * alpha_exp + volume.iloc[i] * labels[i]
+            bvc[i] = current_bvc
+        if np.max(np.abs(bvc)) != 0:
+            bvc = bvc / np.max(np.abs(bvc)) * scale
+        self.metrics = pd.DataFrame({'stamp': times, 'bvc': bvc})
+        return self.metrics
+
+    def _label(self, r: float, sigma: float):
+        if sigma > 0.0:
+            val = t.cdf(r / sigma, df=self._dof)
+            return 2*val - 1.0
+        else:
+            return 0.0
 
 class ACDBVC:
-    def __init__(self, kappa=0.1):
-        self.kappa = kappa
+    def __init__(self, kappa: float):
+        self._kappa = kappa
+        self.metrics = None
 
-    def eval(self, trades):
-        trades = trades.sort_values('time')
-        durations = trades['time'].diff().shift(-1).fillna(1)
-        residuals = (durations - durations.mean()) / durations.std()
-        price_changes = np.log(trades['price']).diff().fillna(0)
-        labels = -residuals * price_changes
-        bvc = np.zeros(len(trades))
-        current = 0
-        for i in range(len(trades)):
-            current = current * np.exp(-self.kappa) + trades['vol'].iloc[i] * labels.iloc[i]
-            bvc[i] = current
-        return pd.DataFrame({'stamp': pd.to_datetime(trades['time'], unit='s'), 'bvc': bvc})
+    def eval(self, df_tr: pd.DataFrame, scale=1e4) -> pd.DataFrame:
+        try:
+            df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
+            df_tr['duration'] = df_tr['time'].diff().shift(-1)
+            df_tr = df_tr.dropna(subset=['duration'])
+            df_tr = df_tr[df_tr['duration'] > 0]
+            if len(df_tr) < 10:
+                raise ValueError("Insufficient trade data for custom ACD model.")
+            
+            mean_duration = df_tr['duration'].mean()
+            std_duration = df_tr['duration'].std() or 1e-10
+            df_tr['standardized_residual'] = (df_tr['duration'] - mean_duration) / std_duration
+            df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
+            df_tr['label'] = -df_tr['standardized_residual'] * df_tr['price_change']
+            df_tr['weighted_volume'] = df_tr['vol'] * df_tr['label']
+            alpha_exp = np.exp(-self._kappa)
+            bvc = np.zeros(len(df_tr), dtype=float)
+            current_bvc = 0.0
+            for wv in df_tr['weighted_volume']:
+                current_bvc = current_bvc * alpha_exp + wv
+                bvc = np.append(bvc, current_bvc)  # or bvc[i] = ...
+            # (Better to build bvc in a list comprehension or loop, but here for clarity)
+
+            bvc = bvc[1:]  # remove the first 0 from initialization
+            if np.max(np.abs(bvc)) != 0:
+                bvc = bvc / np.max(np.abs(bvc)) * scale
+            self.metrics = pd.DataFrame({
+                'stamp': pd.to_datetime(df_tr['time'], unit='s'),
+                'bvc': bvc
+            })
+            return self.metrics
+        except Exception as e:
+            st.error(f"Error in ACDBVC model: {e}")
+            return pd.DataFrame()
 
 class ACIBVC:
-    def __init__(self, kappa=0.1):
-        self.kappa = kappa
+    def __init__(self, kappa: float):
+        self._kappa = kappa
+        self.metrics = None
 
-    def eval(self, trades):
-        times = trades['time'].values
+    def eval(self, df_tr: pd.DataFrame, scale=1e4) -> pd.DataFrame:
+        try:
+            df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
+            times = df_tr['time'].values
+            intensities = self.estimate_intensity(times, self._kappa)
+            df_tr = df_tr.iloc[:len(intensities)]
+            df_tr['intensity'] = intensities
+            df_tr['price_change'] = np.log(df_tr['price'] / df_tr['price'].shift(1)).fillna(0)
+            df_tr['label'] = df_tr['intensity'] * df_tr['price_change']
+            df_tr['weighted_volume'] = df_tr['vol'] * df_tr['label']
+
+            alpha_exp = np.exp(-self._kappa)
+            bvc_list = []
+            current_bvc = 0.0
+            for wv in df_tr['weighted_volume']:
+                current_bvc = current_bvc * alpha_exp + wv
+                bvc_list.append(current_bvc)
+            bvc = np.array(bvc_list)
+            if np.max(np.abs(bvc)) != 0:
+                bvc = bvc / np.max(np.abs(bvc)) * scale
+            self.metrics = pd.DataFrame({
+                'stamp': pd.to_datetime(df_tr['time'], unit='s'),
+                'bvc': bvc
+            })
+            return self.metrics
+        except Exception as e:
+            st.error(f"Error in ACIBVC model: {e}")
+            return pd.DataFrame()
+
+    def estimate_intensity(self, times: np.ndarray, beta: float) -> np.ndarray:
         intensities = [0.0]
         for i in range(1, len(times)):
-            dt = times[i] - times[i-1]
-            intensities.append(intensities[-1] * np.exp(-self.kappa * dt) + 1)
-        price_changes = np.log(trades['price']).diff().fillna(0)
-        labels = np.array(intensities) * price_changes
-        bvc = np.zeros(len(trades))
-        current = 0
-        for i in range(len(trades)):
-            current = current * np.exp(-self.kappa) + trades['vol'].iloc[i] * labels.iloc[i]
-            bvc[i] = current
-        return pd.DataFrame({'stamp': pd.to_datetime(trades['time'], unit='s'), 'bvc': bvc})
+            delta_t = times[i] - times[i-1]
+            intensities.append(intensities[-1] * np.exp(-beta * delta_t) + 1)
+        return np.array(intensities)
 
 # =============================================================================
 # MAIN DASHBOARD LOGIC
 # =============================================================================
-symbol = st.sidebar.text_input("Symbol", "BTC/USD")
+st.header("Section 1: Momentum, Skewness & BVC Analysis")
+
+symbol_bsi1 = st.sidebar.text_input(
+    "Enter Ticker Symbol (Sec 1)", value="BTC/USD", key="symbol_bsi1"
+)
+st.write(f"Fetching data for: **{symbol_bsi1}** with a global lookback of **{global_lookback_minutes}** minutes and timeframe **{timeframe}**.")
+
+# Fetch OHLC data
 try:
-    ohlc_data = fetch_data(symbol, timeframe, global_lookback_minutes)
-    ohlc_data['ScaledPrice'] = np.log(ohlc_data['close']/ohlc_data['close'].iloc[0]) * 1e4
-    ohlc_data['ScaledPrice_EMA'] = ema(ohlc_data['ScaledPrice'].values, 10)
+    prices_bsi = fetch_data(
+        symbol=symbol_bsi1,
+        timeframe=timeframe,
+        lookback_minutes=global_lookback_minutes
+    )
+    st.write("Data range:", prices_bsi["stamp"].min(), "to", prices_bsi["stamp"].max())
 except Exception as e:
-    st.error(f"Data fetch error: {e}")
+    st.error(f"Error fetching data: {e}")
     st.stop()
 
-# BVC Calculation
-if bvc_model == "Hawkes":
-    model = HawkesBVC()
-    bvc_data = model.eval(ohlc_data)
+prices_bsi.dropna(subset=['close', 'volume'], inplace=True)
+prices_bsi['stamp'] = pd.to_datetime(prices_bsi['stamp'])
+prices_bsi.set_index('stamp', inplace=True)
+
+# Compute scaled price & EMA
+prices_bsi['ScaledPrice'] = np.log(prices_bsi['close'] / prices_bsi['close'].iloc[0]) * 1e4
+prices_bsi['ScaledPrice_EMA'] = ema(prices_bsi['ScaledPrice'].values, window=10)
+
+# Compute VWAP
+prices_bsi['cum_vol'] = prices_bsi['volume'].cumsum()
+prices_bsi['cum_pv'] = (prices_bsi['close'] * prices_bsi['volume']).cumsum()
+prices_bsi['vwap'] = prices_bsi['cum_pv'] / prices_bsi['cum_vol']
+if prices_bsi['vwap'].iloc[0] == 0 or not np.isfinite(prices_bsi['vwap'].iloc[0]):
+    st.warning("VWAP initial value is zero or invalid. Using ScaledPrice as fallback for VWAP plotting.")
+    prices_bsi['vwap_transformed'] = prices_bsi['ScaledPrice']
 else:
+    prices_bsi['vwap_transformed'] = np.log(prices_bsi['vwap'] / prices_bsi['vwap'].iloc[0]) * 1e4
+
+# Select & compute BVC
+if bvc_model == "Hawkes":
+    model = HawkesBVC(window=20, kappa=0.1)
+    bvc_metrics = model.eval(prices_bsi.reset_index())
+elif bvc_model in ["ACD", "ACI"]:
     try:
-        trades = fetch_trades_kraken(symbol, global_lookback_minutes)
-        if bvc_model == "ACD":
-            model = ACDBVC()
-        else:
-            model = ACIBVC()
-        bvc_data = model.eval(trades)
-        # Critical resampling step for trade-based models
-        bvc_data = bvc_data.set_index('stamp').resample(timeframe).last().ffill().reset_index()
+        trades_df = fetch_trades_kraken(symbol=symbol_bsi1, lookback_minutes=global_lookback_minutes)
     except Exception as e:
-        st.error(f"Trade processing error: {e}")
+        st.error(f"Error fetching trade data: {e}")
         st.stop()
+    if bvc_model == "ACD":
+        model = ACDBVC(kappa=0.1)
+    else:
+        model = ACIBVC(kappa=0.1)
+    bvc_metrics = model.eval(trades_df)
+else:
+    st.error("Invalid BVC model selection.")
+    st.stop()
 
-# Merge and clean data
-merged = ohlc_data.merge(bvc_data, on='stamp', how='left')
-merged['bvc'] = merged['bvc'].ffill().fillna(0)
+# Merge BVC with price data
+df_merged = prices_bsi.reset_index().merge(bvc_metrics, on='stamp', how='left')
+df_merged.sort_values('stamp', inplace=True)
+df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
 
-# Plotting
-fig, ax = plt.subplots(figsize=(10, 4))
-norm = plt.Normalize(merged['bvc'].min(), merged['bvc'].max())
-for i in range(len(merged)-1):
-    ax.plot(merged['stamp'].iloc[i:i+2], merged['ScaledPrice'].iloc[i:i+2],
-            color=plt.cm.coolwarm(norm(merged['bvc'].iloc[i])),
-            linewidth=1.5)
-ax.plot(merged['stamp'], merged['ScaledPrice_EMA'], 'grey', alpha=0.8, label='EMA')
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
-plt.xticks(rotation=45)
+# Force symmetrical color range around 0 so you SEE negative vs. positive
+bvc_min = df_merged['bvc'].min()
+bvc_max = df_merged['bvc'].max()
+abs_max = max(abs(bvc_min), abs(bvc_max))
+
+global_min = df_merged['ScaledPrice'].min()
+global_max = df_merged['ScaledPrice'].max()
+
+# -----------------------------------------------------------------------------
+# PRICE CHART COLORED BY BVC
+# -----------------------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
+# Use a symmetrical normalization so small negative values appear clearly red
+norm_bvc = plt.Normalize(-abs_max, abs_max)
+
+for i in range(len(df_merged) - 1):
+    xvals = df_merged['stamp'].iloc[i:i+2]
+    yvals = df_merged['ScaledPrice'].iloc[i:i+2]
+    bvc_val = df_merged['bvc'].iloc[i]
+    # We'll use 'bwr' so negative is bluish, positive is reddish
+    cmap_bvc = plt.cm.get_cmap('bwr')
+    color = cmap_bvc(norm_bvc(bvc_val))
+    ax.plot(xvals, yvals, color=color, linewidth=1.2)
+
+# Plot EMA & VWAP
+ax.plot(
+    df_merged['stamp'], df_merged['ScaledPrice_EMA'],
+    color='black', linewidth=1, label="EMA(10)"
+)
+ax.plot(
+    df_merged['stamp'], df_merged['vwap_transformed'],
+    color='gray', linewidth=1, label="VWAP"
+)
+
+ax.set_xlabel("Time", fontsize=8)
+ax.set_ylabel("ScaledPrice", fontsize=8)
+ax.set_title(f"Price Colored by {bvc_model} BVC", fontsize=10)
+ax.legend(fontsize=7)
+ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+plt.setp(ax.get_xticklabels(), rotation=30, ha='right', fontsize=7)
+plt.setp(ax.get_yticklabels(), fontsize=7)
+ax.set_ylim(global_min - 50, global_max + 50)
+plt.tight_layout()
 st.pyplot(fig)
 
-# BVC Subplot
-fig2, ax2 = plt.subplots(figsize=(10, 2))
-ax2.plot(merged['stamp'], merged['bvc'], 'purple', linewidth=0.8)
-ax2.fill_between(merged['stamp'], merged['bvc'], alpha=0.2)
-st.pyplot(fig2)
+# -----------------------------------------------------------------------------
+# BVC PLOT
+# -----------------------------------------------------------------------------
+fig_bvc, ax_bvc = plt.subplots(figsize=(10, 3), dpi=120)
+ax_bvc.plot(
+    df_merged['stamp'], df_merged['bvc'],
+    color="blue", linewidth=1, label=f"BVC ({bvc_model})"
+)
+ax_bvc.set_xlabel("Time", fontsize=8)
+ax_bvc.set_ylabel("BVC", fontsize=8)
+ax_bvc.legend(fontsize=7)
+ax_bvc.set_title("BVC Over Time", fontsize=10)
+ax_bvc.xaxis.set_major_locator(mdates.AutoDateLocator())
+ax_bvc.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+plt.setp(ax_bvc.get_xticklabels(), rotation=30, ha='right', fontsize=7)
+plt.setp(ax_bvc.get_yticklabels(), fontsize=7)
+st.pyplot(fig_bvc)
