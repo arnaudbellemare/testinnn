@@ -367,6 +367,8 @@ df_merged = prices_bsi.reset_index().merge(bvc_metrics, on='stamp', how='left')
 df_merged.sort_values('stamp', inplace=True)
 df_merged['bvc'] = df_merged['bvc'].fillna(method='ffill').fillna(0)
 
+# Normalize BVC for consistent coloring across models
+df_merged['bvc_norm'] = (df_merged['bvc'] - df_merged['bvc'].min()) / (df_merged['bvc'].max() - df_merged['bvc'].min())
 global_min = df_merged['ScaledPrice'].min()
 global_max = df_merged['ScaledPrice'].max()
 
@@ -374,13 +376,14 @@ global_max = df_merged['ScaledPrice'].max()
 # PLOTTING SECTION - Price Chart Colored by Normalized BVC
 # =============================================================================
 fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-norm_bvc = plt.Normalize(df_merged['bvc'].min(), df_merged['bvc'].max())
+norm_bvc = plt.Normalize(0, 1)
 for i in range(len(df_merged) - 1):
     xvals = df_merged['stamp'].iloc[i:i+2]
     yvals = df_merged['ScaledPrice'].iloc[i:i+2]
-    bvc_val = df_merged['bvc'].iloc[i]
-    cmap_bvc = plt.cm.Blues if bvc_val >= 0 else plt.cm.Reds
-    color = cmap_bvc(norm_bvc(bvc_val))
+    # Use the normalized bvc for coloring regardless of the model
+    norm_val = df_merged['bvc_norm'].iloc[i]
+    cmap_bvc = plt.cm.Blues if df_merged['bvc'].iloc[i] >= 0 else plt.cm.Reds
+    color = cmap_bvc(norm_bvc(norm_val))
     ax.plot(xvals, yvals, color=color, linewidth=1)
 ax.plot(df_merged['stamp'], df_merged['ScaledPrice_EMA'], color='gray',
         linewidth=0.7, label=f"EMA({ema_window})")
@@ -413,4 +416,3 @@ ax_bvc.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
 plt.setp(ax_bvc.get_xticklabels(), rotation=30, ha='right', fontsize=7)
 plt.setp(ax_bvc.get_yticklabels(), fontsize=7)
 st.pyplot(fig_bvc)
-
