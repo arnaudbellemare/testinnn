@@ -9,12 +9,16 @@ from scipy.stats import norm, t
 from plotnine import ggplot, aes, geom_line, labs, theme_minimal, theme
 
 # =============================================================================
+# SESSION STATE INITIALIZATION
+# =============================================================================
+if "username" not in st.session_state:
+    st.session_state["username"] = "Guest"
+
+# =============================================================================
 # Dashboard Title & Welcome Message
 # =============================================================================
 st.title("CNO Dashboard")
 st.write(f"Welcome, {st.session_state['username']}!")
-if "username" not in st.session_state:
-    st.session_state["username"] = "Guest"
 
 # =============================================================================
 # GLOBAL VARIABLES & HELPER FUNCTIONS
@@ -139,6 +143,7 @@ class HawkesBVC:
         volume = df['volume']
         sigma = r.rolling(self._window).std().fillna(0.0)
         alpha_exp = np.exp(-self._kappa)
+        # Use t distribution for the student t cdf
         labels = np.array([self._label(r.iloc[i], sigma.iloc[i]) for i in range(len(r))])
         bvc = np.zeros(len(volume), dtype=float)
         current_bvc = 0.0
@@ -152,7 +157,7 @@ class HawkesBVC:
 
     def _label(self, r: float, sigma: float):
         if sigma > 0.0:
-            cum = studentt.cdf(r / sigma, df=self._dof)
+            cum = t.cdf(r / sigma, df=self._dof)
             return 2 * cum - 1.0
         else:
             return 0.0
@@ -192,7 +197,8 @@ class ACDBVC:
             for i in range(len(df_tr)):
                 current_bvc = current_bvc * np.exp(-self._kappa) + df_tr['weighted_volume'].iloc[i]
                 bvc[i] = current_bvc
-            bvc = bvc / np.max(np.abs(bvc)) * scale if np.max(np.abs(bvc)) != 0 else bvc
+            if np.max(np.abs(bvc)) != 0:
+                bvc = bvc / np.max(np.abs(bvc)) * scale
             self.metrics = pd.DataFrame({
                 'stamp': pd.to_datetime(df_tr['time'], unit='s'),
                 'bvc': bvc
@@ -223,7 +229,8 @@ class ACIBVC:
             for i in range(len(df_tr)):
                 current_bvc = current_bvc * np.exp(-self._kappa) + df_tr['weighted_volume'].iloc[i]
                 bvc[i] = current_bvc
-            bvc = bvc / np.max(np.abs(bvc)) * scale if np.max(np.abs(bvc)) != 0 else bvc
+            if np.max(np.abs(bvc)) != 0:
+                bvc = bvc / np.max(np.abs(bvc)) * scale
             self.metrics = pd.DataFrame({
                 'stamp': pd.to_datetime(df_tr['time'], unit='s'),
                 'bvc': bvc
