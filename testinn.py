@@ -5,9 +5,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import ccxt
 from numba import njit
-from scipy.stats import norm, t
+from scipy.stats import norm, t, studentt
 from plotnine import ggplot, aes, geom_line, labs, theme_minimal, theme
-from matplotlib.collections import LineCollection
 
 # =============================================================================
 # SESSION STATE INITIALIZATION
@@ -165,6 +164,7 @@ class ACDBVC:
     def eval(self, df_tr: pd.DataFrame, scale=1e4) -> pd.DataFrame:
         try:
             df_tr = df_tr.dropna(subset=['time', 'price', 'vol']).copy()
+            # Compute duration in seconds (since time is in seconds as float)
             df_tr['duration'] = df_tr['time'].diff().shift(-1)
             df_tr = df_tr.dropna(subset=['duration'])
             df_tr = df_tr[df_tr['duration'] > 0]
@@ -186,6 +186,7 @@ class ACDBVC:
             bvc = np.array(bvc_list)
             if np.max(np.abs(bvc)) != 0:
                 bvc = bvc / np.max(np.abs(bvc)) * scale
+            # Create stamp column from "time" (epoch seconds)
             df_tr["stamp"] = pd.to_datetime(df_tr["time"], unit='s')
             self.metrics = pd.DataFrame({'stamp': df_tr["stamp"], 'bvc': bvc})
             return self.metrics
@@ -334,30 +335,20 @@ global_max = df_merged['ScaledPrice'].max()
 norm_bvc = plt.Normalize(-1, 1)
 
 # =============================================================================
-# PLOTTING SECTION - Price Chart Colored by Normalized BVC (Gradient)
+# PLOTTING SECTION - Price Chart Colored by Normalized BVC
 # =============================================================================
-dates = mdates.date2num(df_merged['stamp'])
-prices = df_merged['ScaledPrice'].values
-
-# Create line segments so that each segment is from point i to i+1
-points = np.array([dates, prices]).T.reshape(-1, 1, 2)
-segments = np.concatenate([points[:-1], points[1:]], axis=1)
-
-# Create a LineCollection with the bwr colormap
-lc = LineCollection(segments, cmap='bwr', norm=norm_bvc)
-lc.set_array(df_merged['bvc'].iloc[:-1].values)
-lc.set_linewidth(1.2)
-
 fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-ax.add_collection(lc)
-ax.autoscale_view()
-
-# Plot EMA and VWAP lines
+for i in range(len(df_merged) - 1):
+    xvals = df_merged['stamp'].iloc[i:i+2]
+    yvals = df_merged['ScaledPrice'].iloc[i:i+2]
+    bvc_val = df_merged['bvc'].iloc[i]
+    # Use bwr colormap: negative -> blue, positive -> red
+    color = plt.cm.bwr(norm_bvc(bvc_val))
+    ax.plot(xvals, yvals, color=color, linewidth=1.2)
 ax.plot(df_merged['stamp'], df_merged['ScaledPrice_EMA'], color='black',
         linewidth=1, label="EMA(10)")
 ax.plot(df_merged['stamp'], df_merged['vwap_transformed'], color='gray',
         linewidth=1, label="VWAP")
-
 ax.set_xlabel("Time", fontsize=8)
 ax.set_ylabel("ScaledPrice", fontsize=8)
 ax.set_title(f"Price with EMA & VWAP (Colored by {bvc_model} BVC)", fontsize=10)
